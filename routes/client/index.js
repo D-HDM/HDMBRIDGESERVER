@@ -2,6 +2,7 @@ const router = require('express').Router();
 
 const authRoutes = require('./auth');
 const emailRoutes = require('./emails');
+const smsRoutes = require('./sms');
 const apiKeyRoutes = require('./apiKeys');
 const domainRoutes = require('./domains');
 const templateRoutes = require('./templates');
@@ -12,6 +13,7 @@ const chatRoutes = require('./chat');
 
 router.use('/auth', authRoutes);
 router.use('/emails', emailRoutes);
+router.use('/sms', smsRoutes);
 router.use('/api-keys', apiKeyRoutes);
 router.use('/domains', domainRoutes);
 router.use('/templates', templateRoutes);

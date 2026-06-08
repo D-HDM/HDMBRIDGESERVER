@@ -1,3 +1,4 @@
+const axios = require('axios');
 const User = require('../../models/client/User');
 const Organization = require('../../models/client/Organization');
 const { AppError } = require('../../middleware/common/errorHandler');
@@ -11,31 +12,50 @@ const getEmailStats = async (req, res, next) => {
       process.env.BREVO_API_KEY_3,
     ].filter(Boolean);
 
-    const accounts = BREVO_KEYS.map((key, i) => ({
-      account: 'Account ' + (i + 1),
-      keyPrefix: key.substring(0, 10) + '...',
-      isActive: true,
-    }));
+    const accounts = await Promise.all(
+      BREVO_KEYS.map(async (key, i) => {
+        try {
+          const response = await axios.get('https://api.brevo.com/v3/smtp/statistics/aggregated', {
+            headers: { 'api-key': key },
+            params: { days: 1 },
+          });
 
+          return {
+            account: 'Account ' + (i + 1),
+            keyPrefix: key.substring(0, 10) + '...',
+            isActive: true,
+            delivered: response.data?.delivered || 0,
+            sent: response.data?.sent || 0,
+            hardBounces: response.data?.hardBounces || 0,
+            softBounces: response.data?.softBounces || 0,
+          };
+        } catch (error) {
+          return {
+            account: 'Account ' + (i + 1),
+            keyPrefix: key.substring(0, 10) + '...',
+            isActive: false,
+            error: error.response?.data?.message || error.message,
+          };
+        }
+      })
+    );
+
+    const totalSent = accounts.reduce((sum, a) => sum + (a.sent || 0), 0);
+    const totalDelivered = accounts.reduce((sum, a) => sum + (a.delivered || 0), 0);
     const totalUsers = await User.countDocuments({ isActive: true, isEmailVerified: true });
-    
-    const EmailLog = require('../../models/client/EmailLog');
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayCount = await EmailLog.countDocuments({ createdAt: { $gte: today } });
-
     const dailyLimit = BREVO_KEYS.length * 300;
-    const usagePercent = Math.round((todayCount / dailyLimit) * 100);
+    const usagePercent = dailyLimit > 0 ? Math.round((totalSent / dailyLimit) * 100) : 0;
 
     res.status(200).json({
       success: true,
       stats: {
-        accounts: accounts,
+        accounts,
         accountsCount: BREVO_KEYS.length,
-        dailyLimit: dailyLimit,
-        sentToday: todayCount,
-        remaining: Math.max(0, dailyLimit - todayCount),
-        usagePercent: usagePercent,
+        dailyLimit,
+        sentToday: totalSent,
+        deliveredToday: totalDelivered,
+        remaining: Math.max(0, dailyLimit - totalSent),
+        usagePercent,
         totalReachableUsers: totalUsers,
       },
     });

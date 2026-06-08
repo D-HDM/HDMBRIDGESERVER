@@ -123,6 +123,8 @@ async function seedPlans() {
         monthlyEmails: 3000,
         dailyEmails: 100,
         hourlyEmails: 10,
+        monthlySms: 0,
+        dailySms: 0,
         apiKeys: 2,
         domains: 1,
         senders: 2,
@@ -137,6 +139,7 @@ async function seedPlans() {
       features: {
         apiAccess: true,
         smtpAccess: false,
+        smsAccess: false,
         customDomain: false,
         templates: true,
         tracking: true,
@@ -164,6 +167,8 @@ async function seedPlans() {
         monthlyEmails: 50000,
         dailyEmails: 2000,
         hourlyEmails: 100,
+        monthlySms: 50,
+        dailySms: 5,
         apiKeys: 10,
         domains: 3,
         senders: 10,
@@ -178,6 +183,7 @@ async function seedPlans() {
       features: {
         apiAccess: true,
         smtpAccess: true,
+        smsAccess: true,
         customDomain: true,
         templates: true,
         tracking: true,
@@ -205,6 +211,8 @@ async function seedPlans() {
         monthlyEmails: 500000,
         dailyEmails: 20000,
         hourlyEmails: 1000,
+        monthlySms: 200,
+        dailySms: 20,
         apiKeys: 999,
         domains: 999,
         senders: 999,
@@ -219,6 +227,7 @@ async function seedPlans() {
       features: {
         apiAccess: true,
         smtpAccess: true,
+        smsAccess: true,
         customDomain: true,
         templates: true,
         tracking: true,
@@ -240,12 +249,14 @@ async function seedPlans() {
       description: 'Custom solutions for large organizations',
       tier: 'enterprise',
       isPublic: false,
-      price: { amount: 0, currency: 'USD', interval: 'month' },
+      price: { amount: 100, currency: 'USD', interval: 'month' },
       trialPeriod: { enabled: false, days: 0 },
       limits: {
         monthlyEmails: 9999999,
         dailyEmails: 999999,
         hourlyEmails: 99999,
+        monthlySms: 9999,
+        dailySms: 999,
         apiKeys: 9999,
         domains: 9999,
         senders: 9999,
@@ -260,6 +271,7 @@ async function seedPlans() {
       features: {
         apiAccess: true,
         smtpAccess: true,
+        smsAccess: true,
         customDomain: true,
         templates: true,
         tracking: true,
@@ -287,7 +299,6 @@ async function seedPlans() {
 
   console.log(`  ✅ ${plans.length} plans seeded`);
 }
-
 async function seedPaymentAndCurrencies() {
   console.log('💰 Seeding Payment Methods...');
 

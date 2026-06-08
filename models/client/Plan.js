@@ -44,6 +44,8 @@ const planSchema = new mongoose.Schema(
       monthlyEmails: { type: Number, default: 3000 },
       dailyEmails: { type: Number, default: 100 },
       hourlyEmails: { type: Number, default: 10 },
+      monthlySms: { type: Number, default: 0 },
+      dailySms: { type: Number, default: 0 },
       apiKeys: { type: Number, default: 2 },
       domains: { type: Number, default: 1 },
       senders: { type: Number, default: 2 },
@@ -58,6 +60,7 @@ const planSchema = new mongoose.Schema(
     features: {
       apiAccess: { type: Boolean, default: true },
       smtpAccess: { type: Boolean, default: false },
+      smsAccess: { type: Boolean, default: false },
       customDomain: { type: Boolean, default: false },
       templates: { type: Boolean, default: true },
       tracking: { type: Boolean, default: true },
