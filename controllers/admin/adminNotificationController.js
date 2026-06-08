@@ -1,6 +1,6 @@
-const axios = require('axios');
 const User = require('../../models/client/User');
 const Organization = require('../../models/client/Organization');
+const EmailLog = require('../../models/client/EmailLog');
 const { AppError } = require('../../middleware/common/errorHandler');
 const logger = require('../../utils/logger');
 
@@ -12,39 +12,30 @@ const getEmailStats = async (req, res, next) => {
       process.env.BREVO_API_KEY_3,
     ].filter(Boolean);
 
-    const accounts = await Promise.all(
-      BREVO_KEYS.map(async (key, i) => {
-        try {
-          const response = await axios.get('https://api.brevo.com/v3/smtp/statistics/aggregated', {
-            headers: { 'api-key': key },
-            params: { days: 1 },
-          });
+    const accounts = BREVO_KEYS.map((key, i) => ({
+      account: 'Account ' + (i + 1),
+      keyPrefix: key.substring(0, 10) + '...',
+      isActive: true,
+    }));
 
-          return {
-            account: 'Account ' + (i + 1),
-            keyPrefix: key.substring(0, 10) + '...',
-            isActive: true,
-            delivered: response.data?.delivered || 0,
-            sent: response.data?.sent || 0,
-            hardBounces: response.data?.hardBounces || 0,
-            softBounces: response.data?.softBounces || 0,
-          };
-        } catch (error) {
-          return {
-            account: 'Account ' + (i + 1),
-            keyPrefix: key.substring(0, 10) + '...',
-            isActive: false,
-            error: error.response?.data?.message || error.message,
-          };
-        }
-      })
-    );
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const thisMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 
-    const totalSent = accounts.reduce((sum, a) => sum + (a.sent || 0), 0);
-    const totalDelivered = accounts.reduce((sum, a) => sum + (a.delivered || 0), 0);
-    const totalUsers = await User.countDocuments({ isActive: true, isEmailVerified: true });
+    const [todayCount, monthCount, totalUsers] = await Promise.all([
+      EmailLog.countDocuments({
+        createdAt: { $gte: today },
+        status: { $in: ['sent', 'delivered', 'opened', 'clicked'] },
+      }),
+      EmailLog.countDocuments({
+        createdAt: { $gte: thisMonth },
+        status: { $in: ['sent', 'delivered', 'opened', 'clicked'] },
+      }),
+      User.countDocuments({ isActive: true, isEmailVerified: true }),
+    ]);
+
     const dailyLimit = BREVO_KEYS.length * 300;
-    const usagePercent = dailyLimit > 0 ? Math.round((totalSent / dailyLimit) * 100) : 0;
+    const usagePercent = dailyLimit > 0 ? Math.round((todayCount / dailyLimit) * 100) : 0;
 
     res.status(200).json({
       success: true,
@@ -52,9 +43,9 @@ const getEmailStats = async (req, res, next) => {
         accounts,
         accountsCount: BREVO_KEYS.length,
         dailyLimit,
-        sentToday: totalSent,
-        deliveredToday: totalDelivered,
-        remaining: Math.max(0, dailyLimit - totalSent),
+        sentToday: todayCount,
+        sentThisMonth: monthCount,
+        remaining: Math.max(0, dailyLimit - todayCount),
         usagePercent,
         totalReachableUsers: totalUsers,
       },
@@ -65,7 +56,7 @@ const getEmailStats = async (req, res, next) => {
 const getOrgActivity = async (req, res, next) => {
   try {
     const limit = parseInt(req.query.limit) || 4;
-    
+
     const organizations = await Organization.find()
       .sort({ createdAt: -1 })
       .limit(limit)
@@ -97,7 +88,7 @@ const getOrgActivity = async (req, res, next) => {
 const sendToUser = async (req, res, next) => {
   try {
     const { userId, subject, message, fromName } = req.body;
-    
+
     if (!userId || !subject || !message) {
       return next(new AppError('userId, subject, and message are required', 400, 'VALIDATION_001'));
     }
@@ -127,13 +118,13 @@ const sendToUser = async (req, res, next) => {
 const sendToAllUsers = async (req, res, next) => {
   try {
     const { subject, message, fromName } = req.body;
-    
+
     if (!subject || !message) {
       return next(new AppError('subject and message are required', 400, 'VALIDATION_001'));
     }
 
     const users = await User.find({ isActive: true, isEmailVerified: true }).select('email firstName lastName organizationId');
-    
+
     if (users.length === 0) {
       return next(new AppError('No active verified users found', 404, 'NOT_FOUND'));
     }
