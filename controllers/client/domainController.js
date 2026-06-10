@@ -6,24 +6,15 @@ const logger = require('../../utils/logger');
 const getDomains = async (req, res, next) => {
   try {
     const domains = await Domain.find({ organizationId: req.organizationId });
-
-    res.status(200).json({
-      success: true,
-      count: domains.length,
-      domains,
-    });
-  } catch (error) {
-    next(error);
-  }
+    res.status(200).json({ success: true, domains });
+  } catch (error) { next(error); }
 };
 
 const addDomain = async (req, res, next) => {
   try {
     const { domain } = req.body;
 
-    if (!domain) {
-      return next(new AppError('Domain is required', 400, 'VALIDATION_001'));
-    }
+    if (!domain) return next(new AppError('Domain is required', 400, 'VALIDATION_001'));
 
     const currentCount = await Domain.countDocuments({ organizationId: req.organizationId });
     if (req.planLimits && currentCount >= req.planLimits.domains) {
@@ -34,9 +25,7 @@ const addDomain = async (req, res, next) => {
       organizationId: req.organizationId,
       domain: domain.toLowerCase(),
     });
-    if (existingDomain) {
-      return next(new AppError('Domain already exists', 409, 'CONFLICT_001'));
-    }
+    if (existingDomain) return next(new AppError('Domain already exists', 409, 'CONFLICT_001'));
 
     const dkimKeys = DnsValidator.generateDKIMKeyPair();
 
@@ -50,16 +39,15 @@ const addDomain = async (req, res, next) => {
 
     const verification = await DnsValidator.verifyDomain(domain.toLowerCase());
 
-    logger.info('Domain added: ' + domain + ' for org ' + req.organizationId);
+    logger.info('Domain added: ' + domain);
 
     res.status(201).json({
       success: true,
       domain: newDomain,
       dnsRecommendations: verification.recommendations,
+      message: 'Domain added. Add the DNS records below, then click Verify.',
     });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 };
 
 const verifyDomain = async (req, res, next) => {
@@ -69,9 +57,7 @@ const verifyDomain = async (req, res, next) => {
       organizationId: req.organizationId,
     });
 
-    if (!domain) {
-      return next(new AppError('Domain not found', 404, 'NOT_FOUND'));
-    }
+    if (!domain) return next(new AppError('Domain not found', 404, 'NOT_FOUND'));
 
     const verification = await DnsValidator.verifyDomain(domain.domain);
 
@@ -101,10 +87,29 @@ const verifyDomain = async (req, res, next) => {
       verified: domain.isVerified,
       verification,
       domain,
+      message: verification.verified ? 'Domain verified successfully!' : 'DNS records not found. Add the records and try again.',
     });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
+};
+
+const getDnsRecords = async (req, res, next) => {
+  try {
+    const domain = await Domain.findOne({
+      _id: req.params.id,
+      organizationId: req.organizationId,
+    });
+
+    if (!domain) return next(new AppError('Domain not found', 404, 'NOT_FOUND'));
+
+    const verification = await DnsValidator.verifyDomain(domain.domain);
+
+    res.status(200).json({
+      success: true,
+      domain: domain.domain,
+      recommendations: verification.recommendations,
+      currentRecords: domain.dnsRecords,
+    });
+  } catch (error) { next(error); }
 };
 
 const deleteDomain = async (req, res, next) => {
@@ -114,24 +119,12 @@ const deleteDomain = async (req, res, next) => {
       organizationId: req.organizationId,
     });
 
-    if (!domain) {
-      return next(new AppError('Domain not found', 404, 'NOT_FOUND'));
-    }
+    if (!domain) return next(new AppError('Domain not found', 404, 'NOT_FOUND'));
 
     logger.info('Domain deleted: ' + domain.domain);
 
-    res.status(200).json({
-      success: true,
-      message: 'Domain deleted successfully',
-    });
-  } catch (error) {
-    next(error);
-  }
+    res.status(200).json({ success: true, message: 'Domain deleted' });
+  } catch (error) { next(error); }
 };
 
-module.exports = {
-  getDomains,
-  addDomain,
-  verifyDomain,
-  deleteDomain,
-};
+module.exports = { getDomains, addDomain, verifyDomain, getDnsRecords, deleteDomain };

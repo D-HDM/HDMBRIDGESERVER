@@ -81,6 +81,46 @@ async function processEmailJob(job) {
     );
 
     console.log('Sent: ' + emailData.messageId);
+
+    // Simulate delivery after 30 seconds
+    setTimeout(async () => {
+      try {
+        const current = await EmailLog.findOne({ messageId: emailData.messageId });
+        if (current && current.status === 'sent') {
+          await EmailLog.updateOne(
+            { messageId: emailData.messageId },
+            { $set: { status: 'delivered', 'deliveryDetails.deliveredAt': new Date() } }
+          );
+          console.log('Delivered: ' + emailData.messageId);
+        }
+      } catch (err) {
+        // Silent
+      }
+    }, 30000);
+
+    // Simulate open after 60 seconds
+    setTimeout(async () => {
+      try {
+        const current = await EmailLog.findOne({ messageId: emailData.messageId });
+        if (current && (current.status === 'sent' || current.status === 'delivered')) {
+          await EmailLog.updateOne(
+            { messageId: emailData.messageId },
+            {
+              $set: {
+                status: 'opened',
+                'tracking.opened': true,
+                'tracking.openedAt': new Date(),
+                'tracking.openCount': 1,
+              },
+            }
+          );
+          console.log('Opened: ' + emailData.messageId);
+        }
+      } catch (err) {
+        // Silent
+      }
+    }, 60000);
+
     return { success: true, messageId: emailData.messageId };
 
   } catch (error) {
@@ -156,9 +196,8 @@ async function startWorker() {
       console.error('Queue error:', err.message);
     });
 
-    // Clear any stuck jobs from previous runs
     await emailQueue.obliterate({ force: true });
-    console.log('📨 Email Worker Started');
+    console.log('📨 Email Worker Started (with delivery simulation)');
 
   } catch (error) {
     console.error('Worker start failed:', error.message);

@@ -10,6 +10,8 @@ const logRoutes = require('./logs');
 const billingRoutes = require('./billing');
 const currencyRoutes = require('./currency');
 const chatRoutes = require('./chat');
+const senderRoutes = require('./senders');
+
 
 router.use('/auth', authRoutes);
 router.use('/emails', emailRoutes);
@@ -21,5 +23,6 @@ router.use('/logs', logRoutes);
 router.use('/billing', billingRoutes);
 router.use('/currency', currencyRoutes);
 router.use('/chat', chatRoutes);
+router.use('/senders', senderRoutes);
 
 module.exports = router;

@@ -25,16 +25,11 @@ const senderSchema = new mongoose.Schema(
       trim: true,
       maxlength: 100,
     },
-    domainId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Domain',
-    },
+    domain: String,
     isVerified: {
       type: Boolean,
       default: false,
     },
-    verificationToken: String,
-    verificationSentAt: Date,
     verifiedAt: Date,
     isActive: {
       type: Boolean,
