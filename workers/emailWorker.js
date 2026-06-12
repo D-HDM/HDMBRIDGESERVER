@@ -93,9 +93,7 @@ async function processEmailJob(job) {
           );
           console.log('Delivered: ' + emailData.messageId);
         }
-      } catch (err) {
-        // Silent
-      }
+      } catch (err) {}
     }, 30000);
 
     // Simulate open after 60 seconds
@@ -116,9 +114,7 @@ async function processEmailJob(job) {
           );
           console.log('Opened: ' + emailData.messageId);
         }
-      } catch (err) {
-        // Silent
-      }
+      } catch (err) {}
     }, 60000);
 
     return { success: true, messageId: emailData.messageId };
@@ -177,6 +173,10 @@ async function startWorker() {
         removeOnFail: 200,
         timeout: 30000,
       },
+      settings: {
+        stalledInterval: 30000,
+        lockDuration: 60000,
+      },
     });
 
     emailQueue.process('send-email', processEmailJob);
@@ -190,7 +190,9 @@ async function startWorker() {
     });
 
     emailQueue.on('error', function(err) {
-      if (err.message.includes('ECONNRESET') || err.message.includes('ETIMEDOUT')) {
+      if (err.message.includes('ECONNRESET') || err.message.includes('ETIMEDOUT')) return;
+      if (err.message.includes('max requests limit')) {
+        console.warn('⚠️ Worker Redis limit reached. Auto-switching...');
         return;
       }
       console.error('Queue error:', err.message);

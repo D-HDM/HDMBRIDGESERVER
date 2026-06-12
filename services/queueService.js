@@ -28,10 +28,18 @@ class QueueService {
         removeOnFail: 200,
         timeout: 30000,
       },
+      settings: {
+        stalledInterval: 30000,
+        lockDuration: 60000,
+      },
     });
 
     this.emailQueue.on('error', (error) => {
       if (error.message.includes('ECONNRESET') || error.message.includes('ETIMEDOUT')) {
+        return;
+      }
+      if (error.message.includes('max requests limit')) {
+        console.warn('⚠️ Queue Redis limit reached. Auto-switching...');
         return;
       }
       logger.error('Queue error: ' + error.message);
