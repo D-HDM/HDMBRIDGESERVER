@@ -2,6 +2,7 @@ const Plan = require('../../models/client/Plan');
 const AIWidgetSetting = require('../../models/admin/AIWidgetSetting');
 const aiService = require('../../services/aiService');
 const SystemSetting = require('../../models/admin/SystemSetting');
+const axios = require('axios');
 
 const getSettings = async (req, res) => {
   try {
@@ -44,7 +45,7 @@ const landingChat = async (req, res) => {
     const config = await AIWidgetSetting.findOne({ isActive: true, isEnabled: true });
     if (!config) return res.status(503).json({ success: false, error: 'Chat unavailable' });
 
-    const systemPrompt = 'You are HDM BRIDGE Assistant. Plans: Free (3K/mo), Pro (50K/mo, $19), Pro+ (500K/mo, $79). Features: API keys, domain verification, templates, tracking, webhooks. Contact: support@hdmbridge.com. Keep responses short and friendly.';
+    const systemPrompt = 'You are HDM BRIDGE Assistant. Plans: Free (3K/mo), Pro (50K/mo, KSh 2,470), Pro+ (500K/mo, KSh 10,270). Features: API keys, domain verification, templates, tracking, webhooks. Contact: support@hdmbridge.com. Keep responses short and friendly.';
 
     const messages = [
       { role: 'system', content: systemPrompt },

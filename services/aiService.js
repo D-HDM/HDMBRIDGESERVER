@@ -48,15 +48,11 @@ class AIService {
       model: config.model,
     });
 
-    const history = await AIChatMessage.find({
-      sessionId: session.sessionId,
-    })
+    const history = await AIChatMessage.find({ sessionId: session.sessionId })
       .sort({ createdAt: -1 })
       .limit(10);
 
-    const messages = [
-      { role: 'system', content: AI_SYSTEM_PROMPT },
-    ];
+    const messages = [{ role: 'system', content: AI_SYSTEM_PROMPT }];
 
     if (config.contextInjection?.includeUserPlan) {
       const contextPrompt = buildContextPrompt(context);
@@ -212,25 +208,23 @@ class AIService {
 
   async callHDM(messages, config) {
     try {
-      const FormData = require('form-data');
-      const formData = new FormData();
-
       const systemMessages = messages.filter(m => m.role === 'system');
       const userMessage = messages.filter(m => m.role === 'user').pop();
 
       const systemPrompt = systemMessages.map(m => m.content).join('\n');
 
-      formData.append('message', userMessage?.content || 'Hello');
-      formData.append('system_prompt', systemPrompt);
-      formData.append('interface', config.interface || 'client');
+      const payload = {
+        message: userMessage?.content || 'Hello',
+        system_prompt: systemPrompt,
+      };
 
       const response = await axios.post(
-        config.baseUrl || 'https://hdmai-server.onrender.com/api/v1/general/chat/public',
-        formData,
+        config.baseUrl || 'https://hdmaiserver.pxxl.click/api/v1/projects/general/public-chat',
+        payload,
         {
           headers: {
-            'x-api-key': config.apiKey,
-            ...formData.getHeaders(),
+            'Authorization': 'Bearer ' + config.apiKey,
+            'Content-Type': 'application/json',
           },
         }
       );
