@@ -1,14 +1,14 @@
 const Plan = require('../../models/client/Plan');
 const AIWidgetSetting = require('../../models/admin/AIWidgetSetting');
-const aiService = require('../../services/aiService');
 const SystemSetting = require('../../models/admin/SystemSetting');
-const axios = require('axios');
+const aiService = require('../../services/aiService');
+const currencyService = require('../../services/currencyService');
 
 const getSettings = async (req, res) => {
   try {
     const settings = await SystemSetting.find({ isPublic: true });
     const settingsObj = {};
-    settings.forEach(s => { settingsObj[s.key] = s.value; });
+    settings.forEach((s) => { settingsObj[s.key] = s.value; });
     res.status(200).json({ success: true, settings: settingsObj });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -17,9 +17,23 @@ const getSettings = async (req, res) => {
 
 const getPlans = async (req, res) => {
   try {
-    const plans = await Plan.find({ isActive: true, isPublic: true })
-      .select('name slug description tier price limits features metadata');
-    res.status(200).json({ success: true, plans });
+    const plans = await Plan.find({ isActive: true, isPublic: true }).sort('metadata.sortOrder');
+    const defaultCurrency = await currencyService.getGlobalDefaultCode();
+
+    const enriched = await Promise.all(plans.map(async (plan) => {
+      const amount = await currencyService.convertPrice(
+        plan.price.amount,
+        plan.price.currency || 'USD',
+        defaultCurrency
+      );
+      const formatted = await currencyService.formatPrice(amount, defaultCurrency);
+      return {
+        ...plan.toJSON(),
+        convertedPrice: { amount, currency: defaultCurrency, formatted },
+      };
+    }));
+
+    res.status(200).json({ success: true, plans: enriched, currency: defaultCurrency });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -31,7 +45,7 @@ const getFeatures = async (req, res) => {
     { icon: '📊', title: 'Real-time Tracking', description: 'Monitor opens, clicks, bounces, and delivery status.' },
     { icon: '🌐', title: 'Domain Verification', description: 'Verify domains with SPF, DKIM, and DMARC.' },
     { icon: '📝', title: 'Email Templates', description: 'Create reusable HTML templates with variables.' },
-    { icon: '🔄', title: 'Webhooks', description: 'Real-time notifications for email events.' },
+    { icon: '🔔', title: 'Webhooks', description: 'Real-time notifications for email events.' },
     { icon: '🛡️', title: 'Spam Protection', description: 'Built-in rate limiting and compliance checks.' },
   ];
   res.status(200).json({ success: true, features });
