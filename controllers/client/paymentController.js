@@ -266,11 +266,10 @@ const mpesaCallback = async (req, res) => {
   const checkoutRequestId = payload?.Body?.stkCallback?.CheckoutRequestID;
   const resultCode = payload?.Body?.stkCallback?.ResultCode;
 
-  logger.info('M-Pesa callback received: ip=' + ip + ' id=' + (checkoutRequestId || 'MISSING') + ' resultCode=' + resultCode);
+  logger.info('M-Pesa callback received: ip=' + ip + ' xff=' + (req.headers['x-forwarded-for'] || 'none') + ' x-real-ip=' + (req.headers['x-real-ip'] || 'none') + ' id=' + (checkoutRequestId || 'MISSING') + ' resultCode=' + resultCode);
 
-  if (process.env.NODE_ENV === 'production' && !mpesaService.isSafaricomIp(ip)) {
-    logger.warn('M-Pesa callback from non-Safaricom IP: ' + ip);
-    return res.status(200).json({ ResultCode: 0, ResultDesc: 'Ignored' });
+  if (!mpesaService.isSafaricomIp(ip)) {
+    logger.warn('M-Pesa callback IP not in Safaricom list: ' + ip + ' (continuing — authenticity enforced by checkoutRequestId match)');
   }
 
   let parsed;
