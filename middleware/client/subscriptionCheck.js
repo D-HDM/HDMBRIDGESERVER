@@ -62,7 +62,8 @@ const checkPlanLimit = (feature) => {
     try {
       const subscription = await Subscription.findOne({
         organizationId: req.organizationId,
-        status: 'active',
+        status: { $in: ['active', 'trialing'] },
+        currentPeriodEnd: { $gt: new Date() },
       }).populate('planId');
 
       if (!subscription) {
@@ -80,7 +81,7 @@ const checkPlanLimit = (feature) => {
 
       const usage = await getCurrentUsage(req.organizationId, feature);
       if (usage >= limit) {
-        return next(new AppError(`${feature} limit reached. Upgrade to add more.`, 429, 'LIMIT_001'));
+        return next(new AppError(feature + ' limit reached. Upgrade to add more.', 429, 'LIMIT_001'));
       }
 
       req.planLimits = limits;

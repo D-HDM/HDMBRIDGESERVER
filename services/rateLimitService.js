@@ -53,7 +53,8 @@ class RateLimitService {
 
       const sub = await Subscription.findOne({
         organizationId,
-        status: 'active',
+        status: { $in: ['active', 'trialing'] },
+        currentPeriodEnd: { $gt: new Date() },
       }).populate('planId');
 
       const limits = sub?.planId?.limits || FALLBACK_LIMITS;
@@ -149,9 +150,7 @@ class RateLimitService {
       const allowed = current <= limit;
 
       if (!allowed) {
-        logger.warn(
-          `Limit exceeded ${limitType} org=${organizationId} current=${current} limit=${limit}`
-        );
+        logger.warn('Limit exceeded ' + limitType + ' org=' + organizationId + ' current=' + current + ' limit=' + limit);
       }
 
       return {

@@ -21,6 +21,7 @@ const routes = require('./routes/index');
 const { errorHandler } = require('./middleware/common/errorHandler');
 const logger = require('./utils/logger');
 const startEmailWorker = require('./workers/emailWorker');
+const { startWorker: startSubscriptionWorker } = require('./workers/subscriptionWorker');
 
 const app = express();
 
@@ -155,6 +156,7 @@ async function start() {
       console.log('');
 
       startEmailWorker();
+      startSubscriptionWorker();
 
       console.log('   Ready to send emails!');
       console.log('');

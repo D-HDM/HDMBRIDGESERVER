@@ -18,6 +18,7 @@ const getSubscription = async (req, res, next) => {
     const subscription = await Subscription.findOne({
       organizationId: req.organizationId,
       status: { $in: ['active', 'past_due', 'trialing'] },
+      currentPeriodEnd: { $gt: new Date() },
     }).populate('planId').sort({ createdAt: -1 });
     if (!subscription) return next(new AppError('No active subscription', 404, 'NOT_FOUND'));
     res.status(200).json({ success: true, subscription });
@@ -42,7 +43,11 @@ const getPlans = async (req, res, next) => {
 
 const getUsage = async (req, res, next) => {
   try {
-    const subscription = await Subscription.findOne({ organizationId: req.organizationId, status: 'active' }).populate('planId');
+    const subscription = await Subscription.findOne({
+      organizationId: req.organizationId,
+      status: { $in: ['active', 'trialing'] },
+      currentPeriodEnd: { $gt: new Date() },
+    }).populate('planId');
     if (!subscription) return next(new AppError('No active subscription', 404, 'NOT_FOUND'));
     const usage = await rateLimitService.getCurrentUsage(req.organizationId);
     const limits = subscription.planId.limits;
