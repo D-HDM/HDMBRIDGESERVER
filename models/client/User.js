@@ -54,8 +54,8 @@ const userSchema = new mongoose.Schema(
     passwordResetExpires: Date,
     preferredCurrency: {
       type: String,
-      default: 'USD',
-      enum: ['USD', 'KES', 'GBP', 'EUR'],
+      uppercase: true,
+      trim: true,
     },
     lastLogin: Date,
     lastLoginIP: String,

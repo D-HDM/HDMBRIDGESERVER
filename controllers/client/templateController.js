@@ -1,6 +1,7 @@
 const Template = require('../../models/client/Template');
 const { AppError } = require('../../middleware/common/errorHandler');
 const Helpers = require('../../utils/helpers');
+const { invalidateUsageCache } = require('../../middleware/client/subscriptionCheck');
 const logger = require('../../utils/logger');
 
 const getTemplates = async (req, res, next) => {
@@ -27,10 +28,7 @@ const getTemplate = async (req, res, next) => {
       _id: req.params.id,
       organizationId: req.organizationId,
     });
-
-    if (!template) {
-      return next(new AppError('Template not found', 404, 'NOT_FOUND'));
-    }
+    if (!template) return next(new AppError('Template not found', 404, 'NOT_FOUND'));
 
     res.status(200).json({ success: true, template });
   } catch (error) {
@@ -62,6 +60,7 @@ const createTemplate = async (req, res, next) => {
       category,
     });
 
+    await invalidateUsageCache(req.organizationId, 'templates');
     logger.info('Template created: ' + template.name);
 
     res.status(201).json({ success: true, template });
@@ -79,13 +78,9 @@ const updateTemplate = async (req, res, next) => {
       { name, subject, htmlContent, textContent, previewText, variables, category, isActive, $inc: { version: 1 } },
       { new: true, runValidators: true }
     );
-
-    if (!template) {
-      return next(new AppError('Template not found', 404, 'NOT_FOUND'));
-    }
+    if (!template) return next(new AppError('Template not found', 404, 'NOT_FOUND'));
 
     logger.info('Template updated: ' + template.name);
-
     res.status(200).json({ success: true, template });
   } catch (error) {
     next(error);
@@ -98,11 +93,9 @@ const deleteTemplate = async (req, res, next) => {
       _id: req.params.id,
       organizationId: req.organizationId,
     });
+    if (!template) return next(new AppError('Template not found', 404, 'NOT_FOUND'));
 
-    if (!template) {
-      return next(new AppError('Template not found', 404, 'NOT_FOUND'));
-    }
-
+    await invalidateUsageCache(req.organizationId, 'templates');
     logger.info('Template deleted: ' + template.name);
 
     res.status(200).json({ success: true, message: 'Template deleted successfully' });
@@ -117,10 +110,7 @@ const duplicateTemplate = async (req, res, next) => {
       _id: req.params.id,
       organizationId: req.organizationId,
     });
-
-    if (!original) {
-      return next(new AppError('Template not found', 404, 'NOT_FOUND'));
-    }
+    if (!original) return next(new AppError('Template not found', 404, 'NOT_FOUND'));
 
     const template = await Template.create({
       organizationId: req.organizationId,
@@ -135,6 +125,7 @@ const duplicateTemplate = async (req, res, next) => {
       category: original.category,
     });
 
+    await invalidateUsageCache(req.organizationId, 'templates');
     res.status(201).json({ success: true, template });
   } catch (error) {
     next(error);

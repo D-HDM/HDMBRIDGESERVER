@@ -1,6 +1,7 @@
 const User = require('../../models/client/User');
 const Organization = require('../../models/client/Organization');
 const EmailLog = require('../../models/client/EmailLog');
+const emailService = require('../../services/emailService');
 const { AppError } = require('../../middleware/common/errorHandler');
 const logger = require('../../utils/logger');
 
@@ -96,19 +97,16 @@ const sendToUser = async (req, res, next) => {
     const user = await User.findById(userId).select('email firstName lastName organizationId');
     if (!user) return next(new AppError('User not found', 404, 'NOT_FOUND'));
 
-    const queueService = require('../../services/queueService');
-    await queueService.addToQueue({
+    await emailService.send(user.email, 'broadcastToUser', {
+      firstName: user.firstName,
+      subject,
+      messageHtml: message,
+    }, {
+      priority: 'high',
       organizationId: user.organizationId,
       userId: user._id,
-      messageId: 'admin_msg_' + Date.now() + '_' + Math.random().toString(36).substring(7),
-      from: process.env.SMTP_FROM_EMAIL || 'noreply@hdmbridge.com',
       fromName: fromName || 'HDM BRIDGE Admin',
-      to: user.email,
-      subject: subject,
-      htmlBody: message,
-      textBody: message.replace(/<[^>]*>/g, ''),
-      priority: 'high',
-    }, 'high');
+    });
 
     logger.info('Admin sent message to: ' + user.email);
     res.status(200).json({ success: true, message: 'Message sent to ' + user.email });
@@ -123,33 +121,43 @@ const sendToAllUsers = async (req, res, next) => {
       return next(new AppError('subject and message are required', 400, 'VALIDATION_001'));
     }
 
-    const users = await User.find({ isActive: true, isEmailVerified: true }).select('email firstName lastName organizationId');
+    const users = await User.find({ isActive: true, isEmailVerified: true })
+      .select('email firstName lastName organizationId');
 
     if (users.length === 0) {
       return next(new AppError('No active verified users found', 404, 'NOT_FOUND'));
     }
 
-    const queueService = require('../../services/queueService');
     let queued = 0;
+    const errors = [];
 
     for (const user of users) {
-      await queueService.addToQueue({
-        organizationId: user.organizationId,
-        userId: user._id,
-        messageId: 'admin_bulk_' + Date.now() + '_' + queued,
-        from: process.env.SMTP_FROM_EMAIL || 'noreply@hdmbridge.com',
-        fromName: fromName || 'HDM BRIDGE Admin',
-        to: user.email,
-        subject: subject,
-        htmlBody: message,
-        textBody: message.replace(/<[^>]*>/g, ''),
-        priority: 'normal',
-      }, 'normal');
-      queued++;
+      try {
+        await emailService.send(user.email, 'broadcastToAll', {
+          firstName: user.firstName,
+          subject,
+          messageHtml: message,
+        }, {
+          priority: 'normal',
+          organizationId: user.organizationId,
+          userId: user._id,
+          fromName: fromName || 'HDM BRIDGE Admin',
+        });
+        queued++;
+      } catch (err) {
+        errors.push({ email: user.email, error: err.message });
+      }
     }
 
-    logger.info('Admin sent bulk message to ' + queued + ' users');
-    res.status(200).json({ success: true, message: 'Message queued for ' + queued + ' users', queued: queued });
+    logger.info('Admin broadcast queued for ' + queued + ' users');
+
+    res.status(200).json({
+      success: true,
+      message: 'Message queued for ' + queued + ' users',
+      queued,
+      failed: errors.length,
+      errors: errors.length > 0 ? errors : undefined,
+    });
   } catch (error) { next(error); }
 };
 

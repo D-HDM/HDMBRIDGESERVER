@@ -2,6 +2,11 @@ const SystemSetting = require('../../models/admin/SystemSetting');
 const PaymentMethod = require('../../models/admin/PaymentMethod');
 const { AppError } = require('../../middleware/common/errorHandler');
 const logger = require('../../utils/logger');
+const {
+  toAdminShape,
+  fromAdminShape,
+  resolveCompositeId,
+} = require('../../utils/paymentMethodAdapter');
 
 const getSettings = async (req, res, next) => {
   try {
@@ -44,8 +49,84 @@ const bulkUpdateSettings = async (req, res, next) => {
 
 const getPaymentMethods = async (req, res, next) => {
   try {
-    const methods = await PaymentMethod.find().sort('sortOrder');
+    const docs = await PaymentMethod.find().sort('sortOrder');
+    const methods = docs.flatMap(toAdminShape);
     res.status(200).json({ success: true, methods });
+  } catch (error) { next(error); }
+};
+
+const updatePaymentMethod = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    let resolvedCode = resolveCompositeId(id) ? id : null;
+    let doc = null;
+
+    if (resolvedCode) {
+      const { parentType } = resolveCompositeId(resolvedCode);
+      doc = await PaymentMethod.findOne({ type: parentType });
+    } else {
+      doc = await PaymentMethod.findById(id);
+      if (doc) {
+        if (doc.type === 'stripe') resolvedCode = 'stripe';
+        else if (doc.type === 'paypal') resolvedCode = 'paypal';
+        else if (doc.type === 'bank_transfer') resolvedCode = 'bank';
+      }
+    }
+
+    if (!doc) return next(new AppError('Payment method not found', 404, 'NOT_FOUND'));
+    if (!resolvedCode) return next(new AppError('Cannot determine payment method code', 400, 'VALIDATION_001'));
+
+    const set = fromAdminShape(resolvedCode, req.body || {});
+    if (!set || Object.keys(set).length === 0) {
+      return next(new AppError('No valid fields to update', 400, 'VALIDATION_001'));
+    }
+
+    await PaymentMethod.updateOne({ _id: doc._id }, { $set: set });
+
+    const fresh = await PaymentMethod.findById(doc._id);
+    const flat = fresh ? toAdminShape(fresh).find(m => m.code === resolvedCode) : null;
+
+    logger.info('Admin updated payment method: ' + resolvedCode);
+    res.status(200).json({ success: true, method: flat });
+  } catch (error) { next(error); }
+};
+
+const togglePaymentMethod = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    let resolvedCode = resolveCompositeId(id) ? id : null;
+    let doc = null;
+
+    if (resolvedCode) {
+      const { parentType } = resolveCompositeId(resolvedCode);
+      doc = await PaymentMethod.findOne({ type: parentType });
+    } else {
+      doc = await PaymentMethod.findById(id);
+      if (doc) {
+        if (doc.type === 'stripe') resolvedCode = 'stripe';
+        else if (doc.type === 'paypal') resolvedCode = 'paypal';
+        else if (doc.type === 'bank_transfer') resolvedCode = 'bank';
+      }
+    }
+
+    if (!doc) return next(new AppError('Payment method not found', 404, 'NOT_FOUND'));
+    if (!resolvedCode) return next(new AppError('Cannot determine payment method code', 400, 'VALIDATION_001'));
+
+    const flatList = toAdminShape(doc);
+    const current = flatList.find(m => m.code === resolvedCode);
+    if (!current) return next(new AppError('Payment method not found', 404, 'NOT_FOUND'));
+
+    const set = fromAdminShape(resolvedCode, { enabled: !current.enabled });
+    await PaymentMethod.updateOne({ _id: doc._id }, { $set: set });
+
+    logger.info('Admin toggled payment method: ' + resolvedCode + ' -> ' + !current.enabled);
+
+    res.status(200).json({
+      success: true,
+      method: { _id: resolvedCode, code: resolvedCode, enabled: !current.enabled },
+    });
   } catch (error) { next(error); }
 };
 
@@ -60,26 +141,6 @@ const getPublicPaymentMethods = async (req, res) => {
   }
 };
 
-const updatePaymentMethod = async (req, res, next) => {
-  try {
-    const method = await PaymentMethod.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
-    if (!method) return next(new AppError('Payment method not found', 404, 'NOT_FOUND'));
-    logger.info('Admin updated payment method: ' + method.name);
-    res.status(200).json({ success: true, method });
-  } catch (error) { next(error); }
-};
-
-const togglePaymentMethod = async (req, res, next) => {
-  try {
-    const method = await PaymentMethod.findById(req.params.id);
-    if (!method) return next(new AppError('Payment method not found', 404, 'NOT_FOUND'));
-    method.isEnabled = !method.isEnabled;
-    await method.save();
-    logger.info('Admin ' + (method.isEnabled ? 'enabled' : 'disabled') + ' payment method: ' + method.name);
-    res.status(200).json({ success: true, method: { id: method._id, name: method.name, isEnabled: method.isEnabled } });
-  } catch (error) { next(error); }
-};
-
 const getSystemHealth = async (req, res) => {
   try {
     const mongoose = require('mongoose');
@@ -91,4 +152,14 @@ const getSystemHealth = async (req, res) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { getSettings, getPublicSettings, updateSetting, bulkUpdateSettings, getPaymentMethods, getPublicPaymentMethods, updatePaymentMethod, togglePaymentMethod, getSystemHealth };
+module.exports = {
+  getSettings,
+  getPublicSettings,
+  updateSetting,
+  bulkUpdateSettings,
+  getPaymentMethods,
+  getPublicPaymentMethods,
+  updatePaymentMethod,
+  togglePaymentMethod,
+  getSystemHealth,
+};

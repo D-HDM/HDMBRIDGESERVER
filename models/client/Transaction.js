@@ -16,6 +16,14 @@ const transactionSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Subscription',
     },
+    invoiceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Invoice',
+    },
+    invoiceNumber: {
+      type: String,
+      index: true,
+    },
     type: {
       type: String,
       enum: ['subscription', 'overage', 'refund', 'credit', 'manual'],
@@ -56,10 +64,6 @@ const transactionSchema = new mongoose.Schema(
       receiptNumber: String,
     },
     description: String,
-    invoiceNumber: {
-      type: String,
-      unique: true,
-    },
     invoiceUrl: String,
     refundDetails: {
       refundedAt: Date,
@@ -96,14 +100,6 @@ const transactionSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
-
-transactionSchema.pre('save', async function (next) {
-  if (!this.invoiceNumber) {
-    const count = await mongoose.model('Transaction').countDocuments();
-    this.invoiceNumber = `INV-${Date.now()}-${count + 1}`;
-  }
-  next();
-});
 
 transactionSchema.index({ organizationId: 1, createdAt: -1 });
 transactionSchema.index({ status: 1 });

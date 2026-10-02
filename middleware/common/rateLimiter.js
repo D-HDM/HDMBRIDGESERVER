@@ -11,9 +11,7 @@ const apiLimiter = rateLimit({
     code: 'LIMIT_003',
     retryAfter: 60,
   },
-  keyGenerator: (req) => {
-    return req.apiKey?._id?.toString() || req.ip;
-  },
+  keyGenerator: (req) => req.apiKey?._id?.toString() || req.ip,
 });
 
 const authLimiter = rateLimit({
@@ -27,32 +25,4 @@ const authLimiter = rateLimit({
   },
 });
 
-const emailSendLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: async (req) => {
-    try {
-      const plan = req.user?.organizationId?.plan || 'free';
-      const limits = {
-        free: 10,
-        pro: 100,
-        proplus: 500,
-      };
-      return limits[plan] || 10;
-    } catch {
-      return 10;
-    }
-  },
-  keyGenerator: (req) => {
-    return req.organizationId?.toString() || req.ip;
-  },
-  handler: (req, res) => {
-    res.status(429).json({
-      success: false,
-      error: 'Email rate limit exceeded',
-      code: 'LIMIT_003',
-      retryAfter: 60,
-    });
-  },
-});
-
-module.exports = { apiLimiter, authLimiter, emailSendLimiter };
+module.exports = { apiLimiter, authLimiter };

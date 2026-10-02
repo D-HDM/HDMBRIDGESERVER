@@ -3,6 +3,9 @@ const SupportedCurrency = require('../models/client/SupportedCurrency');
 const { getRedisClient } = require('../config/redis');
 const logger = require('../utils/logger');
 
+const DEFAULT_CACHE_KEY = 'currency:default';
+const DEFAULT_CACHE_TTL = 300;
+
 class CurrencyService {
   async getExchangeRate(from, to) {
     if (from === to) return 1;
@@ -11,7 +14,6 @@ class CurrencyService {
       const redis = getRedisClient();
       const cacheKey = `fx:${from}:${to}`;
       const cached = await redis.get(cacheKey);
-
       if (cached) return parseFloat(cached);
 
       const rate = await ExchangeRate.findOne({
@@ -25,7 +27,6 @@ class CurrencyService {
         return rate.rate;
       }
 
-      // Fallback reverse calculation
       const reverseRate = await ExchangeRate.findOne({
         fromCurrency: to,
         toCurrency: from,
@@ -40,7 +41,7 @@ class CurrencyService {
 
       return 1;
     } catch (error) {
-      logger.error('Failed to get exchange rate:', error.message);
+      logger.error('Failed to get exchange rate: ' + error.message);
       return 1;
     }
   }
@@ -85,12 +86,11 @@ class CurrencyService {
       );
     }
 
-    // Clear cache
-    const redis = getRedisClient();
-    const keys = await redis.keys('fx:*');
-    if (keys.length > 0) {
-      await redis.del(keys);
-    }
+    try {
+      const redis = getRedisClient();
+      const keys = await redis.keys('fx:*');
+      if (keys.length > 0) await redis.del(keys);
+    } catch {}
 
     logger.info('Exchange rates updated');
   }
@@ -101,6 +101,35 @@ class CurrencyService {
 
   async getDefaultCurrency() {
     return SupportedCurrency.findOne({ isDefault: true, isActive: true });
+  }
+
+  async getGlobalDefaultCode() {
+    try {
+      const redis = getRedisClient();
+      const cached = await redis.get(DEFAULT_CACHE_KEY);
+      if (cached) return cached;
+
+      const currency = await SupportedCurrency.findOne({ isDefault: true, isActive: true });
+      const code = currency?.code
+        || (await SupportedCurrency.findOne({ isActive: true }))?.code
+        || 'USD';
+
+      await redis.set(DEFAULT_CACHE_KEY, code, 'EX', DEFAULT_CACHE_TTL);
+      return code;
+    } catch (error) {
+      logger.error('getGlobalDefaultCode failed: ' + error.message);
+      const currency = await SupportedCurrency.findOne({ isDefault: true, isActive: true });
+      return currency?.code || 'USD';
+    }
+  }
+
+  async invalidateGlobalDefault() {
+    try {
+      const redis = getRedisClient();
+      await redis.del(DEFAULT_CACHE_KEY);
+    } catch (error) {
+      logger.error('invalidateGlobalDefault failed: ' + error.message);
+    }
   }
 }
 

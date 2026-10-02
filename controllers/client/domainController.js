@@ -1,6 +1,7 @@
 const Domain = require('../../models/client/Domain');
 const DnsValidator = require('../../utils/dnsValidator');
 const { AppError } = require('../../middleware/common/errorHandler');
+const { invalidateUsageCache } = require('../../middleware/client/subscriptionCheck');
 const logger = require('../../utils/logger');
 
 const getDomains = async (req, res, next) => {
@@ -13,7 +14,6 @@ const getDomains = async (req, res, next) => {
 const addDomain = async (req, res, next) => {
   try {
     const { domain } = req.body;
-
     if (!domain) return next(new AppError('Domain is required', 400, 'VALIDATION_001'));
 
     const currentCount = await Domain.countDocuments({ organizationId: req.organizationId });
@@ -38,7 +38,7 @@ const addDomain = async (req, res, next) => {
     });
 
     const verification = await DnsValidator.verifyDomain(domain.toLowerCase());
-
+    await invalidateUsageCache(req.organizationId, 'domains');
     logger.info('Domain added: ' + domain);
 
     res.status(201).json({
@@ -56,7 +56,6 @@ const verifyDomain = async (req, res, next) => {
       _id: req.params.id,
       organizationId: req.organizationId,
     });
-
     if (!domain) return next(new AppError('Domain not found', 404, 'NOT_FOUND'));
 
     const verification = await DnsValidator.verifyDomain(domain.domain);
@@ -87,7 +86,9 @@ const verifyDomain = async (req, res, next) => {
       verified: domain.isVerified,
       verification,
       domain,
-      message: verification.verified ? 'Domain verified successfully!' : 'DNS records not found. Add the records and try again.',
+      message: verification.verified
+        ? 'Domain verified successfully!'
+        : 'DNS records not found. Add the records and try again.',
     });
   } catch (error) { next(error); }
 };
@@ -98,7 +99,6 @@ const getDnsRecords = async (req, res, next) => {
       _id: req.params.id,
       organizationId: req.organizationId,
     });
-
     if (!domain) return next(new AppError('Domain not found', 404, 'NOT_FOUND'));
 
     const verification = await DnsValidator.verifyDomain(domain.domain);
@@ -118,9 +118,9 @@ const deleteDomain = async (req, res, next) => {
       _id: req.params.id,
       organizationId: req.organizationId,
     });
-
     if (!domain) return next(new AppError('Domain not found', 404, 'NOT_FOUND'));
 
+    await invalidateUsageCache(req.organizationId, 'domains');
     logger.info('Domain deleted: ' + domain.domain);
 
     res.status(200).json({ success: true, message: 'Domain deleted' });

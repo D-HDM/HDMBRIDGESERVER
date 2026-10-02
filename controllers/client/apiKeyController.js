@@ -1,6 +1,7 @@
 const ApiKey = require('../../models/client/ApiKey');
 const ApiKeyGenerator = require('../../utils/generateApiKey');
 const { AppError } = require('../../middleware/common/errorHandler');
+const { invalidateUsageCache } = require('../../middleware/client/subscriptionCheck');
 const logger = require('../../utils/logger');
 
 const getApiKeys = async (req, res, next) => {
@@ -21,15 +22,28 @@ const createApiKey = async (req, res, next) => {
     const { fullKey, prefix } = ApiKeyGenerator.generate();
     const hash = await ApiKeyGenerator.hashKey(fullKey);
     const apiKey = await ApiKey.create({
-      organizationId: req.organizationId, userId: req.user._id,
-      name: name || 'API Key ' + (currentCount + 1), prefix, hash,
-      scopes: scopes || ['send'], ipWhitelist: ipWhitelist || [],
-      domainRestrictions: domainRestrictions || [], expiresAt: expiresAt || null,
+      organizationId: req.organizationId,
+      userId: req.user._id,
+      name: name || 'API Key ' + (currentCount + 1),
+      prefix,
+      hash,
+      scopes: scopes || ['send'],
+      ipWhitelist: ipWhitelist || [],
+      domainRestrictions: domainRestrictions || [],
+      expiresAt: expiresAt || null,
     });
+    await invalidateUsageCache(req.organizationId, 'apiKeys');
     logger.info('API key created: ' + apiKey.name);
     res.status(201).json({
       success: true,
-      apiKey: { id: apiKey._id, name: apiKey.name, key: fullKey, prefix: apiKey.prefix, scopes: apiKey.scopes, expiresAt: apiKey.expiresAt },
+      apiKey: {
+        id: apiKey._id,
+        name: apiKey.name,
+        key: fullKey,
+        prefix: apiKey.prefix,
+        scopes: apiKey.scopes,
+        expiresAt: apiKey.expiresAt,
+      },
       message: 'Store this key safely. It will not be shown again.',
     });
   } catch (error) { next(error); }
@@ -41,6 +55,7 @@ const revokeApiKey = async (req, res, next) => {
     if (!apiKey) return next(new AppError('API key not found', 404, 'NOT_FOUND'));
     apiKey.isActive = false;
     await apiKey.save();
+    await invalidateUsageCache(req.organizationId, 'apiKeys');
     logger.info('API key revoked: ' + apiKey.name);
     res.status(200).json({ success: true, message: 'API key revoked successfully' });
   } catch (error) { next(error); }
@@ -55,7 +70,18 @@ const updateApiKey = async (req, res, next) => {
       { new: true, runValidators: true }
     );
     if (!apiKey) return next(new AppError('API key not found', 404, 'NOT_FOUND'));
-    res.status(200).json({ success: true, apiKey: { id: apiKey._id, name: apiKey.name, prefix: apiKey.prefix, scopes: apiKey.scopes, isActive: apiKey.isActive, lastUsed: apiKey.lastUsed, expiresAt: apiKey.expiresAt } });
+    res.status(200).json({
+      success: true,
+      apiKey: {
+        id: apiKey._id,
+        name: apiKey.name,
+        prefix: apiKey.prefix,
+        scopes: apiKey.scopes,
+        isActive: apiKey.isActive,
+        lastUsed: apiKey.lastUsed,
+        expiresAt: apiKey.expiresAt,
+      },
+    });
   } catch (error) { next(error); }
 };
 

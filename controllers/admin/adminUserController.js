@@ -1,6 +1,15 @@
 const mongoose = require('mongoose');
 const User = require('../../models/client/User');
 const Organization = require('../../models/client/Organization');
+const Subscription = require('../../models/client/Subscription');
+const EmailLog = require('../../models/client/EmailLog');
+const SmsLog = require('../../models/client/SmsLog');
+const ApiKey = require('../../models/client/ApiKey');
+const Domain = require('../../models/client/Domain');
+const Sender = require('../../models/client/Sender');
+const Template = require('../../models/client/Template');
+const Transaction = require('../../models/client/Transaction');
+const rateLimitService = require('../../services/rateLimitService');
 const { AppError } = require('../../middleware/common/errorHandler');
 const logger = require('../../utils/logger');
 
@@ -25,24 +34,221 @@ const getUsers = async (req, res, next) => {
       User.find(filter).populate('organizationId', 'name email').sort(sort).skip(skip).limit(limit),
       User.countDocuments(filter),
     ]);
-    res.status(200).json({ success: true, data: users, pagination: { page, limit, total, pages: Math.ceil(total / limit), hasNext: page * limit < total, hasPrev: page > 1 } });
+    res.status(200).json({
+      success: true,
+      data: users,
+      pagination: {
+        page, limit, total,
+        pages: Math.ceil(total / limit),
+        hasNext: page * limit < total,
+        hasPrev: page > 1,
+      },
+    });
   } catch (error) { next(error); }
 };
 
 const getUserById = async (req, res, next) => {
-  try { const user = await User.findById(req.params.id).populate('organizationId'); if (!user) return next(new AppError('User not found', 404, 'NOT_FOUND')); res.status(200).json({ success: true, user }); } catch (error) { next(error); }
+  try {
+    const user = await User.findById(req.params.id).populate('organizationId').lean();
+    if (!user) return next(new AppError('User not found', 404, 'NOT_FOUND'));
+
+    const organizationId = user.organizationId?._id || user.organizationId;
+
+    const [
+      subscription,
+      emailStats,
+      smsStats,
+      apiKeysCount,
+      domainsCount,
+      verifiedDomainsCount,
+      sendersCount,
+      templatesCount,
+      teamMembersCount,
+      recentEmails,
+      recentTransactions,
+    ] = await Promise.all([
+      Subscription.findOne({ organizationId, status: { $in: ['active', 'past_due', 'trialing'] } })
+        .populate('planId')
+        .sort({ createdAt: -1 })
+        .lean(),
+
+      EmailLog.aggregate([
+        { $match: { organizationId } },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]),
+
+      SmsLog.aggregate([
+        { $match: { organizationId } },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]),
+
+      ApiKey.countDocuments({ organizationId, isActive: true }),
+      Domain.countDocuments({ organizationId }),
+      Domain.countDocuments({ organizationId, isVerified: true }),
+      Sender.countDocuments({ organizationId }),
+      Template.countDocuments({ organizationId }),
+      User.countDocuments({ organizationId, isActive: true }),
+
+      EmailLog.find({ organizationId })
+        .select('messageId to subject status tags createdAt')
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .lean(),
+
+      Transaction.find({ organizationId })
+        .select('invoiceNumber amount currency status paymentMethod description createdAt')
+        .sort({ createdAt: -1 })
+        .limit(5)
+        .lean(),
+    ]);
+
+    const emailCounts = {
+      sent: 0,
+      delivered: 0,
+      opened: 0,
+      clicked: 0,
+      queued: 0,
+      processing: 0,
+      failed: 0,
+      bounced: 0,
+      spam: 0,
+      deferred: 0,
+      total: 0,
+    };
+    for (const row of emailStats) {
+      emailCounts[row._id] = row.count;
+      emailCounts.total += row.count;
+    }
+
+    const smsCounts = { sent: 0, failed: 0, queued: 0, total: 0 };
+    for (const row of smsStats) {
+      smsCounts[row._id] = row.count;
+      smsCounts.total += row.count;
+    }
+
+    let planBlock = null;
+    let usageBlock = null;
+
+    if (subscription && subscription.planId) {
+      const plan = subscription.planId;
+      const now = new Date();
+      const periodEnd = subscription.currentPeriodEnd ? new Date(subscription.currentPeriodEnd) : null;
+      const msLeft = periodEnd ? periodEnd.getTime() - now.getTime() : 0;
+      const daysLeft = msLeft > 0 ? Math.ceil(msLeft / (24 * 60 * 60 * 1000)) : 0;
+
+      planBlock = {
+        planId: plan._id,
+        name: plan.name,
+        tier: plan.tier,
+        price: plan.price,
+        limits: plan.limits,
+        features: plan.features,
+        status: subscription.status,
+        paymentMethod: subscription.paymentMethod,
+        currentPeriodStart: subscription.currentPeriodStart,
+        currentPeriodEnd: subscription.currentPeriodEnd,
+        cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
+        daysLeft,
+      };
+
+      let currentUsage = { daily: 0, monthly: 0, smsDaily: 0, smsMonthly: 0 };
+      try {
+        currentUsage = await rateLimitService.getCurrentUsage(organizationId.toString());
+      } catch (err) {
+        logger.error('getCurrentUsage failed for admin user view: ' + err.message);
+      }
+
+      const dailyLimit = plan.limits?.dailyEmails || 0;
+      const monthlyLimit = plan.limits?.monthlyEmails || 0;
+      const dailySmsLimit = plan.limits?.dailySms || 0;
+      const monthlySmsLimit = plan.limits?.monthlySms || 0;
+
+      usageBlock = {
+        dailyEmails: {
+          current: currentUsage.daily,
+          limit: dailyLimit,
+          percentage: dailyLimit > 0 ? Math.round((currentUsage.daily / dailyLimit) * 100) : 0,
+        },
+        monthlyEmails: {
+          current: currentUsage.monthly,
+          limit: monthlyLimit,
+          percentage: monthlyLimit > 0 ? Math.round((currentUsage.monthly / monthlyLimit) * 100) : 0,
+        },
+        dailySms: {
+          current: currentUsage.smsDaily,
+          limit: dailySmsLimit,
+          percentage: dailySmsLimit > 0 ? Math.round((currentUsage.smsDaily / dailySmsLimit) * 100) : 0,
+        },
+        monthlySms: {
+          current: currentUsage.smsMonthly,
+          limit: monthlySmsLimit,
+          percentage: monthlySmsLimit > 0 ? Math.round((currentUsage.smsMonthly / monthlySmsLimit) * 100) : 0,
+        },
+      };
+    }
+
+    const counts = {
+      emails: emailCounts,
+      sms: smsCounts,
+      apiKeys: apiKeysCount,
+      domains: domainsCount,
+      verifiedDomains: verifiedDomainsCount,
+      senders: sendersCount,
+      templates: templatesCount,
+      teamMembers: teamMembersCount,
+    };
+
+    res.status(200).json({
+      success: true,
+      user,
+      organization: user.organizationId || null,
+      subscription: planBlock,
+      usage: usageBlock,
+      counts,
+      recentEmails,
+      recentTransactions,
+    });
+  } catch (error) { next(error); }
 };
 
 const updateUser = async (req, res, next) => {
-  try { const { firstName, lastName, phone, role, isActive } = req.body; const user = await User.findByIdAndUpdate(req.params.id, { firstName, lastName, phone, role, isActive }, { new: true, runValidators: true }); if (!user) return next(new AppError('User not found', 404, 'NOT_FOUND')); logger.info('Admin updated user: ' + user.email); res.status(200).json({ success: true, user }); } catch (error) { next(error); }
+  try {
+    const { firstName, lastName, phone, role, isActive } = req.body;
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { firstName, lastName, phone, role, isActive },
+      { new: true, runValidators: true }
+    );
+    if (!user) return next(new AppError('User not found', 404, 'NOT_FOUND'));
+    logger.info('Admin updated user: ' + user.email);
+    res.status(200).json({ success: true, user });
+  } catch (error) { next(error); }
 };
 
 const suspendUser = async (req, res, next) => {
-  try { const user = await User.findByIdAndUpdate(req.params.id, { isActive: false }, { new: true }); if (!user) return next(new AppError('User not found', 404, 'NOT_FOUND')); logger.info('Admin suspended user: ' + user.email); res.status(200).json({ success: true, message: 'User suspended', user: { id: user._id, email: user.email, isActive: user.isActive } }); } catch (error) { next(error); }
+  try {
+    const user = await User.findByIdAndUpdate(req.params.id, { isActive: false }, { new: true });
+    if (!user) return next(new AppError('User not found', 404, 'NOT_FOUND'));
+    logger.info('Admin suspended user: ' + user.email);
+    res.status(200).json({
+      success: true,
+      message: 'User suspended',
+      user: { id: user._id, email: user.email, isActive: user.isActive },
+    });
+  } catch (error) { next(error); }
 };
 
 const activateUser = async (req, res, next) => {
-  try { const user = await User.findByIdAndUpdate(req.params.id, { isActive: true }, { new: true }); if (!user) return next(new AppError('User not found', 404, 'NOT_FOUND')); logger.info('Admin activated user: ' + user.email); res.status(200).json({ success: true, message: 'User activated', user: { id: user._id, email: user.email, isActive: user.isActive } }); } catch (error) { next(error); }
+  try {
+    const user = await User.findByIdAndUpdate(req.params.id, { isActive: true }, { new: true });
+    if (!user) return next(new AppError('User not found', 404, 'NOT_FOUND'));
+    logger.info('Admin activated user: ' + user.email);
+    res.status(200).json({
+      success: true,
+      message: 'User activated',
+      user: { id: user._id, email: user.email, isActive: user.isActive },
+    });
+  } catch (error) { next(error); }
 };
 
 const deleteUser = async (req, res, next) => {
@@ -51,7 +257,9 @@ const deleteUser = async (req, res, next) => {
     if (!user) return next(new AppError('User not found', 404, 'NOT_FOUND'));
     if (user.role === 'owner') {
       const orgUserCount = await User.countDocuments({ organizationId: user.organizationId });
-      if (orgUserCount <= 1) return next(new AppError('Cannot delete the only owner. Delete the organization instead.', 400, 'VALIDATION_001'));
+      if (orgUserCount <= 1) {
+        return next(new AppError('Cannot delete the only owner. Delete the organization instead.', 400, 'VALIDATION_001'));
+      }
     }
     await User.findByIdAndDelete(req.params.id);
     logger.info('Admin deleted user: ' + user.email);
@@ -80,7 +288,16 @@ const getOrganizations = async (req, res, next) => {
       const userCount = await User.countDocuments({ organizationId: org._id });
       return { ...org, userCount };
     }));
-    res.status(200).json({ success: true, data: orgsWithCounts, pagination: { page, limit, total, pages: Math.ceil(total / limit), hasNext: page * limit < total, hasPrev: page > 1 } });
+    res.status(200).json({
+      success: true,
+      data: orgsWithCounts,
+      pagination: {
+        page, limit, total,
+        pages: Math.ceil(total / limit),
+        hasNext: page * limit < total,
+        hasPrev: page > 1,
+      },
+    });
   } catch (error) { next(error); }
 };
 
@@ -89,8 +306,13 @@ const getOrganizationById = async (req, res, next) => {
     const organization = await Organization.findById(req.params.id).lean();
     if (!organization) return next(new AppError('Organization not found', 404, 'NOT_FOUND'));
     const userCount = await User.countDocuments({ organizationId: organization._id });
-    const users = await User.find({ organizationId: organization._id }).select('firstName lastName email role isActive').lean();
-    res.status(200).json({ success: true, organization: { ...organization, userCount, users } });
+    const users = await User.find({ organizationId: organization._id })
+      .select('firstName lastName email role isActive')
+      .lean();
+    res.status(200).json({
+      success: true,
+      organization: { ...organization, userCount, users },
+    });
   } catch (error) { next(error); }
 };
 
@@ -100,7 +322,7 @@ const deleteOrganization = async (req, res, next) => {
     const org = await Organization.findById(orgId);
     if (!org) return next(new AppError('Organization not found', 404, 'NOT_FOUND'));
 
-    console.log('🗑️ Deleting organization: ' + org.name + ' (' + orgId + ')');
+    logger.info('Admin deleting organization: ' + org.name + ' (' + orgId + ')');
     const db = mongoose.connection.db;
     const ObjectId = mongoose.Types.ObjectId;
 
@@ -119,24 +341,34 @@ const deleteOrganization = async (req, res, next) => {
     ];
 
     let totalDeleted = 0;
-
     for (const col of collections) {
       try {
         const result = await db.collection(col.name).deleteMany({ organizationId: new ObjectId(orgId) });
         totalDeleted += result.deletedCount || 0;
-        console.log('  ' + col.label + ': ' + (result.deletedCount || 0));
       } catch (e) {
-        console.log('  ' + col.label + ': skipped (collection may not exist)');
+        logger.warn('Admin delete org: skipped collection ' + col.name);
       }
     }
 
     await Organization.findByIdAndDelete(orgId);
-    console.log('  Organization: deleted');
-    console.log('✅ Total records removed: ' + totalDeleted);
 
     logger.info('Admin deleted organization: ' + org.name + ' (' + totalDeleted + ' records)');
-    res.status(200).json({ success: true, message: 'Organization and all associated data deleted', deletedRecords: totalDeleted });
+    res.status(200).json({
+      success: true,
+      message: 'Organization and all associated data deleted',
+      deletedRecords: totalDeleted,
+    });
   } catch (error) { next(error); }
 };
 
-module.exports = { getUsers, getUserById, updateUser, suspendUser, activateUser, deleteUser, getOrganizations, getOrganizationById, deleteOrganization };
+module.exports = {
+  getUsers,
+  getUserById,
+  updateUser,
+  suspendUser,
+  activateUser,
+  deleteUser,
+  getOrganizations,
+  getOrganizationById,
+  deleteOrganization,
+};

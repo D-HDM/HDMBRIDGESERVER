@@ -1,12 +1,10 @@
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const AdminUser = require('../../models/admin/AdminUser');
+const emailService = require('../../services/emailService');
 const { AppError } = require('../../middleware/common/errorHandler');
 const logger = require('../../utils/logger');
 
-// @desc    Admin login
-// @route   POST /admin/api/auth/login
-// @access  Public
 const login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
@@ -16,18 +14,11 @@ const login = async (req, res, next) => {
     }
 
     const admin = await AdminUser.findOne({ email: email.toLowerCase() }).select('+password');
-    if (!admin) {
-      return next(new AppError('Invalid credentials', 401, 'AUTH_001'));
-    }
-
-    if (!admin.isActive) {
-      return next(new AppError('Account deactivated. Contact super admin.', 403, 'AUTH_002'));
-    }
+    if (!admin) return next(new AppError('Invalid credentials', 401, 'AUTH_001'));
+    if (!admin.isActive) return next(new AppError('Account deactivated. Contact super admin.', 403, 'AUTH_002'));
 
     const isMatch = await admin.comparePassword(password);
-    if (!isMatch) {
-      return next(new AppError('Invalid credentials', 401, 'AUTH_001'));
-    }
+    if (!isMatch) return next(new AppError('Invalid credentials', 401, 'AUTH_001'));
 
     const token = jwt.sign(
       { id: admin._id, role: admin.role },
@@ -39,7 +30,7 @@ const login = async (req, res, next) => {
     admin.lastLoginIP = req.ip;
     await admin.save({ validateBeforeSave: false });
 
-    logger.info(`Admin logged in: ${admin.email}`);
+    logger.info('Admin logged in: ' + admin.email);
 
     res.status(200).json({
       success: true,
@@ -53,18 +44,12 @@ const login = async (req, res, next) => {
         isSuperAdmin: admin.isSuperAdmin,
       },
     });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 };
 
-// @desc    Get current admin
-// @route   GET /admin/api/auth/me
-// @access  Private (Admin)
 const getMe = async (req, res, next) => {
   try {
     const admin = await AdminUser.findById(req.admin._id).populate('role');
-
     res.status(200).json({
       success: true,
       admin: {
@@ -77,35 +62,23 @@ const getMe = async (req, res, next) => {
         lastLogin: admin.lastLogin,
       },
     });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 };
 
-// @desc    Admin logout
-// @route   POST /admin/api/auth/logout
-// @access  Private (Admin)
 const logout = async (req, res, next) => {
   try {
-    logger.info(`Admin logged out: ${req.admin.email}`);
-
-    res.status(200).json({
-      success: true,
-      message: 'Logged out successfully',
-    });
-  } catch (error) {
-    next(error);
-  }
+    logger.info('Admin logged out: ' + req.admin.email);
+    res.status(200).json({ success: true, message: 'Logged out successfully' });
+  } catch (error) { next(error); }
 };
 
-// @desc    Forgot password
-// @route   POST /admin/api/auth/forgot-password
-// @access  Public
 const forgotPassword = async (req, res, next) => {
   try {
     const { email } = req.body;
+    if (!email) return next(new AppError('Email is required', 400, 'VALIDATION_001'));
 
     const admin = await AdminUser.findOne({ email: email.toLowerCase() });
+
     if (!admin) {
       return res.status(200).json({
         success: true,
@@ -120,24 +93,31 @@ const forgotPassword = async (req, res, next) => {
     admin.passwordResetExpires = new Date(Date.now() + 60 * 60 * 1000);
     await admin.save({ validateBeforeSave: false });
 
-    logger.info(`Password reset requested for admin: ${admin.email}`);
+    const resetUrl = (process.env.ADMIN_URL || 'http://localhost:3001') + '/reset-password/' + resetToken;
+
+    await emailService.send(admin.email, 'passwordReset', {
+      firstName: admin.firstName,
+      resetUrl,
+      expiresMinutes: 60,
+    }, {
+      priority: 'high',
+      userId: admin._id,
+    }).catch((err) => logger.error('Admin password reset email failed: ' + err.message));
+
+    logger.info('Password reset requested for admin: ' + admin.email);
 
     res.status(200).json({
       success: true,
       message: 'If the email exists, a reset link will be sent',
     });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 };
 
-// @desc    Reset password
-// @route   POST /admin/api/auth/reset-password/:token
-// @access  Public
 const resetPassword = async (req, res, next) => {
   try {
     const { token } = req.params;
     const { password } = req.body;
+    if (!password) return next(new AppError('Password is required', 400, 'VALIDATION_001'));
 
     const resetHash = crypto.createHash('sha256').update(token).digest('hex');
 
@@ -146,24 +126,27 @@ const resetPassword = async (req, res, next) => {
       passwordResetExpires: { $gt: new Date() },
     });
 
-    if (!admin) {
-      return next(new AppError('Invalid or expired reset token', 400, 'AUTH_001'));
-    }
+    if (!admin) return next(new AppError('Invalid or expired reset token', 400, 'AUTH_001'));
 
     admin.password = password;
     admin.passwordResetToken = undefined;
     admin.passwordResetExpires = undefined;
     await admin.save();
 
-    logger.info(`Password reset completed for admin: ${admin.email}`);
+    await emailService.send(admin.email, 'passwordChanged', {
+      firstName: admin.firstName,
+      at: new Date(),
+      ip: req.ip,
+      userAgent: req.headers['user-agent'],
+    }, {
+      priority: 'high',
+      userId: admin._id,
+    }).catch((err) => logger.error('Admin password changed email failed: ' + err.message));
 
-    res.status(200).json({
-      success: true,
-      message: 'Password reset successful',
-    });
-  } catch (error) {
-    next(error);
-  }
+    logger.info('Password reset completed for admin: ' + admin.email);
+
+    res.status(200).json({ success: true, message: 'Password reset successful' });
+  } catch (error) { next(error); }
 };
 
 module.exports = {

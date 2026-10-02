@@ -1,5 +1,6 @@
 const Sender = require('../../models/client/Sender');
 const { AppError } = require('../../middleware/common/errorHandler');
+const { invalidateUsageCache } = require('../../middleware/client/subscriptionCheck');
 const logger = require('../../utils/logger');
 
 const getSenders = async (req, res, next) => {
@@ -30,7 +31,6 @@ const addSender = async (req, res, next) => {
       return next(new AppError('Sender email already exists', 409, 'CONFLICT_001'));
     }
 
-    // Extract domain from email
     const domain = email.split('@')[1];
 
     const sender = await Sender.create({
@@ -42,6 +42,7 @@ const addSender = async (req, res, next) => {
       isVerified: false,
     });
 
+    await invalidateUsageCache(req.organizationId, 'senders');
     logger.info('Sender added: ' + sender.email);
 
     res.status(201).json({
@@ -65,7 +66,6 @@ const markAsVerified = async (req, res, next) => {
       _id: req.params.id,
       organizationId: req.organizationId,
     });
-
     if (!sender) return next(new AppError('Sender not found', 404, 'NOT_FOUND'));
 
     sender.isVerified = true;
@@ -73,7 +73,6 @@ const markAsVerified = async (req, res, next) => {
     await sender.save();
 
     logger.info('Sender marked as verified: ' + sender.email);
-
     res.status(200).json({ success: true, sender });
   } catch (error) { next(error); }
 };
@@ -84,11 +83,9 @@ const setDefault = async (req, res, next) => {
       _id: req.params.id,
       organizationId: req.organizationId,
     });
-
     if (!sender) return next(new AppError('Sender not found', 404, 'NOT_FOUND'));
     if (!sender.isVerified) return next(new AppError('Sender must be verified first', 400, 'VALIDATION_001'));
 
-    // Remove default from all other senders
     await Sender.updateMany(
       { organizationId: req.organizationId },
       { isDefault: false }
@@ -98,7 +95,6 @@ const setDefault = async (req, res, next) => {
     await sender.save();
 
     logger.info('Default sender set: ' + sender.email);
-
     res.status(200).json({ success: true, sender });
   } catch (error) { next(error); }
 };
@@ -109,9 +105,9 @@ const deleteSender = async (req, res, next) => {
       _id: req.params.id,
       organizationId: req.organizationId,
     });
-
     if (!sender) return next(new AppError('Sender not found', 404, 'NOT_FOUND'));
 
+    await invalidateUsageCache(req.organizationId, 'senders');
     logger.info('Sender deleted: ' + sender.email);
 
     res.status(200).json({ success: true, message: 'Sender deleted' });
