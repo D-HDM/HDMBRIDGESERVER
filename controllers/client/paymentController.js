@@ -11,6 +11,12 @@ const User = require('../../models/client/User');
 const { AppError } = require('../../middleware/common/errorHandler');
 const logger = require('../../utils/logger');
 
+function clientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (fwd) return String(fwd).split(',')[0].trim();
+  return (req.ip || req.connection?.remoteAddress || '').replace('::ffff:', '');
+}
+
 async function activateSubscription(organizationId, planId, paymentMethod) {
   const plan = planId ? await Plan.findById(planId) : null;
   const startDate = new Date();
@@ -140,24 +146,8 @@ const stripeWebhook = async (req, res) => {
   }
 };
 
-const mpesaCallback = async (req, res) => {
+async function processMpesaCallback(payload, parsed) {
   try {
-    const payload = req.body;
-
-    if (process.env.NODE_ENV === 'production' && !mpesaService.isSafaricomIp(req.ip)) {
-      logger.warn('M-Pesa callback from non-Safaricom IP: ' + req.ip);
-      return res.status(200).json({ ResultCode: 0, ResultDesc: 'Ignored' });
-    }
-
-    const parsed = mpesaService.parseCallback(payload);
-
-    if (parsed.checkoutRequestId && mpesaService.isDuplicateCallback(parsed.checkoutRequestId)) {
-      logger.info('Duplicate M-Pesa callback ignored: ' + parsed.checkoutRequestId);
-      return res.status(200).json({ ResultCode: 0, ResultDesc: 'Duplicate ignored' });
-    }
-
-    res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
-
     if (!parsed.checkoutRequestId) return;
 
     const transaction = await Transaction.findOne({
@@ -169,7 +159,10 @@ const mpesaCallback = async (req, res) => {
       return;
     }
 
-    if (transaction.status === 'completed') return;
+    if (transaction.status === 'completed') {
+      logger.info('M-Pesa callback: transaction already completed ' + transaction._id);
+      return;
+    }
 
     if (parsed.success) {
       await Transaction.findByIdAndUpdate(transaction._id, {
@@ -263,9 +256,48 @@ const mpesaCallback = async (req, res) => {
       logger.warn('M-Pesa payment failed: ' + parsed.resultCode + ' ' + parsed.resultDesc);
     }
   } catch (error) {
-    logger.error('M-Pesa callback error: ' + error.message);
-    if (!res.headersSent) res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+    logger.error('M-Pesa processMpesaCallback failed: ' + error.message);
   }
+}
+
+const mpesaCallback = async (req, res) => {
+  const payload = req.body;
+  const ip = clientIp(req);
+  const checkoutRequestId = payload?.Body?.stkCallback?.CheckoutRequestID;
+  const resultCode = payload?.Body?.stkCallback?.ResultCode;
+
+  logger.info('M-Pesa callback received: ip=' + ip + ' id=' + (checkoutRequestId || 'MISSING') + ' resultCode=' + resultCode);
+
+  if (process.env.NODE_ENV === 'production' && !mpesaService.isSafaricomIp(ip)) {
+    logger.warn('M-Pesa callback from non-Safaricom IP: ' + ip);
+    return res.status(200).json({ ResultCode: 0, ResultDesc: 'Ignored' });
+  }
+
+  let parsed;
+  try {
+    parsed = mpesaService.parseCallback(payload);
+  } catch (err) {
+    logger.error('M-Pesa parseCallback failed: ' + err.message);
+    return res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+  }
+
+  if (!parsed.checkoutRequestId) {
+    logger.warn('M-Pesa callback without checkoutRequestId');
+    return res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+  }
+
+  if (mpesaService.isDuplicateCallback(parsed.checkoutRequestId)) {
+    logger.info('Duplicate M-Pesa callback ignored: ' + parsed.checkoutRequestId);
+    return res.status(200).json({ ResultCode: 0, ResultDesc: 'Duplicate ignored' });
+  }
+
+  res.status(200).json({ ResultCode: 0, ResultDesc: 'Accepted' });
+
+  setImmediate(() => {
+    processMpesaCallback(payload, parsed).catch((err) =>
+      logger.error('M-Pesa processMpesaCallback threw: ' + err.message)
+    );
+  });
 };
 
 const mpesaTimeout = async (req, res) => {
