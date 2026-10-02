@@ -194,20 +194,28 @@ const payInvoice = async (req, res, next) => {
       const userCurrency = req.user?.preferredCurrency || 'KES';
       const amount = await currencyService.convertPrice(invoice.total, invoice.currency, userCurrency);
 
-      const transaction = await Transaction.create({
+      let transaction = await Transaction.findOne({
         organizationId: req.organizationId,
-        userId: req.user._id,
-        type: 'subscription',
-        status: 'pending',
-        amount: invoice.total,
-        currency: invoice.currency,
-        convertedAmount: amount,
-        paymentMethod: 'mpesa',
-        description: invoice.planName + ' Subscription',
         invoiceId: invoice._id,
-        invoiceNumber: invoice.invoiceNumber,
-        metadata: { planId: invoice.planId, invoiceId: invoice._id, invoiceNumber: invoice.invoiceNumber },
+        status: 'pending',
       });
+
+      if (!transaction) {
+        transaction = await Transaction.create({
+          organizationId: req.organizationId,
+          userId: req.user._id,
+          type: 'subscription',
+          status: 'pending',
+          amount: invoice.total,
+          currency: invoice.currency,
+          convertedAmount: amount,
+          paymentMethod: 'mpesa',
+          description: invoice.planName + ' Subscription',
+          invoiceId: invoice._id,
+          invoiceNumber: invoice.invoiceNumber,
+          metadata: { planId: invoice.planId, invoiceId: invoice._id, invoiceNumber: invoice.invoiceNumber },
+        });
+      }
 
       const result = await mpesaService.initiateSTKPush({
         phone: phoneNumber,
@@ -225,9 +233,12 @@ const payInvoice = async (req, res, next) => {
       }
 
       await Transaction.findByIdAndUpdate(transaction._id, {
+        status: 'pending',
         'mpesaDetails.merchantRequestId': result.merchantRequestId,
         'mpesaDetails.checkoutRequestId': result.checkoutRequestId,
         'mpesaDetails.phoneNumber': phoneNumber,
+        'mpesaDetails.resultCode': undefined,
+        'mpesaDetails.resultDesc': undefined,
       });
 
       await Invoice.findByIdAndUpdate(invoice._id, {

@@ -13,9 +13,12 @@ build/
 # Logs
 *.log
 npm-debug.log*
+logs/
+!logs/.gitkeep
 
 # Runtime data
 backups/
+!backups/.gitkeep
 tmp/
 uploads/*
 !uploads/.gitkeep

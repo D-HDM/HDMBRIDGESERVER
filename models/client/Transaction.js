@@ -19,10 +19,10 @@ const transactionSchema = new mongoose.Schema(
     invoiceId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Invoice',
+      index: true,
     },
     invoiceNumber: {
       type: String,
-      index: true,
     },
     type: {
       type: String,
@@ -42,7 +42,6 @@ const transactionSchema = new mongoose.Schema(
     currency: {
       type: String,
       default: 'USD',
-      enum: ['USD', 'KES', 'GBP', 'EUR'],
     },
     exchangeRate: {
       type: Number,
@@ -103,6 +102,7 @@ const transactionSchema = new mongoose.Schema(
 
 transactionSchema.index({ organizationId: 1, createdAt: -1 });
 transactionSchema.index({ status: 1 });
-transactionSchema.index({ invoiceNumber: 1 });
+transactionSchema.index({ invoiceNumber: 1 }, { sparse: true });
+transactionSchema.index({ 'mpesaDetails.checkoutRequestId': 1 }, { sparse: true });
 
 module.exports = mongoose.model('Transaction', transactionSchema);
