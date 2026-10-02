@@ -3,6 +3,7 @@ const {
   getSubscription,
   getPlans,
   getUsage,
+  getRenewData,
   createInvoice,
   getInvoice,
   getPendingInvoice,
@@ -20,6 +21,7 @@ const tenantIsolation = require('../../middleware/common/tenantIsolation');
 router.get('/subscription', auth, tenantIsolation, getSubscription);
 router.get('/plans', auth, getPlans);
 router.get('/usage', auth, tenantIsolation, getUsage);
+router.get('/renew', auth, tenantIsolation, getRenewData);
 router.get('/transactions', auth, tenantIsolation, getTransactions);
 
 router.post('/invoice', auth, tenantIsolation, createInvoice);

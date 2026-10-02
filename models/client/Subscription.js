@@ -15,7 +15,7 @@ const subscriptionSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['active', 'past_due', 'canceled', 'incomplete', 'incomplete_expired', 'trialing', 'paused'],
+      enum: ['active', 'past_due', 'canceled', 'incomplete', 'incomplete_expired', 'trialing', 'paused', 'frozen', 'expired'],
       default: 'active',
     },
     currentPeriodStart: {
@@ -34,6 +34,13 @@ const subscriptionSchema = new mongoose.Schema(
     endedAt: Date,
     trialStart: Date,
     trialEnd: Date,
+    frozenAt: Date,
+    renewalInvoiceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Invoice',
+      default: null,
+    },
+    lastRenewalReminderAt: Date,
     paymentMethod: {
       type: String,
       enum: ['stripe', 'paypal', 'mpesa', 'bank_transfer', 'manual'],
@@ -63,6 +70,7 @@ const subscriptionSchema = new mongoose.Schema(
 
 subscriptionSchema.index({ organizationId: 1, status: 1 });
 subscriptionSchema.index({ currentPeriodEnd: 1 });
+subscriptionSchema.index({ status: 1, currentPeriodEnd: 1 });
 subscriptionSchema.index({ paymentProviderSubscriptionId: 1 });
 
 module.exports = mongoose.model('Subscription', subscriptionSchema);

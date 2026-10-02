@@ -17,11 +17,43 @@ const getSubscription = async (req, res, next) => {
   try {
     const subscription = await Subscription.findOne({
       organizationId: req.organizationId,
-      status: { $in: ['active', 'past_due', 'trialing'] },
-      currentPeriodEnd: { $gt: new Date() },
+      status: { $in: ['active', 'past_due', 'trialing', 'frozen'] },
     }).populate('planId').sort({ createdAt: -1 });
-    if (!subscription) return next(new AppError('No active subscription', 404, 'NOT_FOUND'));
-    res.status(200).json({ success: true, subscription });
+
+    if (subscription) {
+      let renewalInvoice = null;
+      if (subscription.renewalInvoiceId) {
+        renewalInvoice = await Invoice.findById(subscription.renewalInvoiceId)
+          .select('invoiceNumber status total currency dueDate amountDue')
+          .lean();
+      }
+      return res.status(200).json({
+        success: true,
+        subscription,
+        renewalInvoice,
+      });
+    }
+
+    const freePlan = await Plan.findOne({ tier: 'free', isActive: true }).lean();
+    if (!freePlan) {
+      return next(new AppError('No active subscription', 404, 'NOT_FOUND'));
+    }
+
+    res.status(200).json({
+      success: true,
+      subscription: {
+        _id: null,
+        organizationId: req.organizationId,
+        planId: freePlan,
+        status: 'active',
+        paymentMethod: 'manual',
+        currentPeriodStart: null,
+        currentPeriodEnd: null,
+        cancelAtPeriodEnd: false,
+        isFallback: true,
+      },
+      renewalInvoice: null,
+    });
   } catch (error) { next(error); }
 };
 
@@ -45,12 +77,26 @@ const getUsage = async (req, res, next) => {
   try {
     const subscription = await Subscription.findOne({
       organizationId: req.organizationId,
-      status: { $in: ['active', 'trialing'] },
-      currentPeriodEnd: { $gt: new Date() },
+      status: { $in: ['active', 'trialing', 'frozen'] },
     }).populate('planId');
-    if (!subscription) return next(new AppError('No active subscription', 404, 'NOT_FOUND'));
+
+    let limits;
+    let planName;
+
+    if (subscription?.planId?.limits) {
+      limits = subscription.planId.limits;
+      planName = subscription.planId.name;
+    } else {
+      const freePlan = await Plan.findOne({ tier: 'free', isActive: true }).lean();
+      if (!freePlan) {
+        return next(new AppError('No active subscription', 404, 'NOT_FOUND'));
+      }
+      limits = freePlan.limits;
+      planName = freePlan.name;
+    }
+
     const usage = await rateLimitService.getCurrentUsage(req.organizationId);
-    const limits = subscription.planId.limits;
+
     res.status(200).json({
       success: true,
       usage: {
@@ -67,7 +113,65 @@ const getUsage = async (req, res, next) => {
         smsDaily: usage.smsDaily,
         smsMonthly: usage.smsMonthly,
       },
-      plan: subscription.planId.name,
+      plan: planName,
+    });
+  } catch (error) { next(error); }
+};
+
+const getRenewData = async (req, res, next) => {
+  try {
+    const subscription = await Subscription.findOne({
+      organizationId: req.organizationId,
+    }).populate('planId').sort({ createdAt: -1 });
+
+    if (!subscription) {
+      return next(new AppError('No subscription found', 404, 'NOT_FOUND'));
+    }
+
+    if (subscription.status === 'active' && subscription.currentPeriodEnd > new Date()) {
+      return res.status(200).json({
+        success: true,
+        needsRenewal: false,
+        subscription: {
+          status: subscription.status,
+          planName: subscription.planId?.name,
+          currentPeriodEnd: subscription.currentPeriodEnd,
+        },
+      });
+    }
+
+    let invoice = subscription.renewalInvoiceId
+      ? await Invoice.findById(subscription.renewalInvoiceId)
+      : null;
+
+    if (!invoice || invoice.status === 'failed' || invoice.status === 'expired') {
+      const owner = await require('../../models/client/User')
+        .findById(subscription.userId || req.user._id)
+        .select('firstName lastName email phone')
+        .lean();
+
+      const result = await invoiceService.generateRenewalInvoice(subscription, owner);
+      invoice = result.invoice;
+
+      await Subscription.updateOne(
+        { _id: subscription._id },
+        { $set: { renewalInvoiceId: invoice._id } }
+      );
+    }
+
+    res.status(200).json({
+      success: true,
+      needsRenewal: true,
+      subscription: {
+        _id: subscription._id,
+        status: subscription.status,
+        frozenAt: subscription.frozenAt,
+        currentPeriodEnd: subscription.currentPeriodEnd,
+        planId: subscription.planId?._id,
+        planName: subscription.planId?.name,
+        planTier: subscription.planId?.tier,
+      },
+      invoice,
     });
   } catch (error) { next(error); }
 };
@@ -102,7 +206,7 @@ const createInvoice = async (req, res, next) => {
       plan,
       user,
       type: 'subscription',
-      dueHours: 3,
+      dueHours: 72,
     });
 
     const invoiceUrl = (process.env.CLIENT_URL || '') + '/invoice/' + invoice.invoiceNumber;
@@ -146,7 +250,7 @@ const getPendingInvoice = async (req, res, next) => {
       dueDate: { $gt: new Date() },
     })
       .sort({ createdAt: -1 })
-      .select('invoiceNumber planId planName total currency status dueDate');
+      .select('invoiceNumber planId planName total currency status dueDate type');
 
     if (!invoice) {
       return res.status(200).json({ success: true, pending: false });
@@ -162,6 +266,7 @@ const getPendingInvoice = async (req, res, next) => {
         total: invoice.total,
         currency: invoice.currency,
         dueDate: invoice.dueDate,
+        type: invoice.type,
       },
     });
   } catch (error) { next(error); }
@@ -367,7 +472,7 @@ const createCheckout = async (req, res, next) => {
       plan,
       user: req.user,
       type: 'subscription',
-      dueHours: 3,
+      dueHours: 72,
     });
 
     const organization = await Organization.findById(req.organizationId);
@@ -398,7 +503,7 @@ const mpesaPayment = async (req, res, next) => {
       plan,
       user: req.user,
       type: 'subscription',
-      dueHours: 3,
+      dueHours: 72,
     });
 
     res.status(200).json({
@@ -423,7 +528,7 @@ const paypalPayment = async (req, res, next) => {
       plan,
       user: req.user,
       type: 'subscription',
-      dueHours: 3,
+      dueHours: 72,
     });
 
     const order = await paypalService.createOrder(plan, req.organizationId);
@@ -447,7 +552,7 @@ const manualPayment = async (req, res, next) => {
       plan,
       user: req.user,
       type: 'subscription',
-      dueHours: 3,
+      dueHours: 72,
     });
 
     res.status(201).json({
@@ -463,6 +568,7 @@ module.exports = {
   getSubscription,
   getPlans,
   getUsage,
+  getRenewData,
   createInvoice,
   getInvoice,
   getPendingInvoice,

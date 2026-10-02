@@ -1,4 +1,5 @@
 const Subscription = require('../models/client/Subscription');
+const Plan = require('../models/client/Plan');
 const EmailLog = require('../models/client/EmailLog');
 const SmsLog = require('../models/client/SmsLog');
 const { getRedisClient } = require('../config/redis');
@@ -6,6 +7,7 @@ const logger = require('../utils/logger');
 
 const PLAN_CACHE_TTL = 60;
 const PLAN_CACHE_PREFIX = 'plan:limits:';
+const FREE_PLAN_CACHE_KEY = 'plan:free';
 
 const LIMIT_TYPES = [
   'dailyEmails',
@@ -43,6 +45,23 @@ function windowKey(limitType) {
   return `${limitType}:${Math.floor(now / w)}`;
 }
 
+async function getFreePlan() {
+  try {
+    const redis = getRedisClient();
+    const cached = await redis.get(FREE_PLAN_CACHE_KEY);
+    if (cached) return JSON.parse(cached);
+
+    const plan = await Plan.findOne({ tier: 'free', isActive: true }).lean();
+    if (plan) {
+      await redis.set(FREE_PLAN_CACHE_KEY, JSON.stringify(plan), 'EX', 300);
+    }
+    return plan;
+  } catch (error) {
+    logger.error('getFreePlan failed: ' + error.message);
+    return null;
+  }
+}
+
 class RateLimitService {
   async getPlanLimits(organizationId) {
     try {
@@ -57,10 +76,16 @@ class RateLimitService {
         currentPeriodEnd: { $gt: new Date() },
       }).populate('planId');
 
-      const limits = sub?.planId?.limits || FALLBACK_LIMITS;
+      let sourceLimits = sub?.planId?.limits;
+
+      if (!sourceLimits) {
+        const free = await getFreePlan();
+        sourceLimits = free?.limits || FALLBACK_LIMITS;
+      }
+
       const plain = {};
       for (const k of LIMIT_TYPES) {
-        plain[k] = typeof limits[k] === 'number' ? limits[k] : FALLBACK_LIMITS[k] ?? 0;
+        plain[k] = typeof sourceLimits[k] === 'number' ? sourceLimits[k] : FALLBACK_LIMITS[k] ?? 0;
       }
 
       await redis.set(key, JSON.stringify(plain), 'EX', PLAN_CACHE_TTL);

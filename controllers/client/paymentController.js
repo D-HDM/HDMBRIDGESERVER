@@ -8,6 +8,7 @@ const Subscription = require('../../models/client/Subscription');
 const Invoice = require('../../models/client/Invoice');
 const Plan = require('../../models/client/Plan');
 const User = require('../../models/client/User');
+const { invalidateSubscriptionState } = require('../../middleware/client/requireActiveSubscription');
 const { AppError } = require('../../middleware/common/errorHandler');
 const logger = require('../../utils/logger');
 
@@ -17,22 +18,47 @@ function clientIp(req) {
   return (req.ip || req.connection?.remoteAddress || '').replace('::ffff:', '');
 }
 
-async function activateSubscription(organizationId, planId, paymentMethod) {
+function intervalToDays(interval) {
+  return interval === 'year' ? 365 : 30;
+}
+
+async function activateSubscription(organizationId, planId, paymentMethod, invoice) {
   const plan = planId ? await Plan.findById(planId) : null;
-  const startDate = new Date();
+
+  const existing = await Subscription.findOne({ organizationId });
+
+  const isRenewal = invoice?.type === 'renewal'
+    && existing
+    && existing.planId
+    && existing.planId.toString() === (plan?._id || planId)?.toString();
+
+  const now = new Date();
+  const wasFrozen = existing?.status === 'frozen';
+  const originalEnd = existing?.currentPeriodEnd;
+
+  let base;
+  if (isRenewal && originalEnd && originalEnd > now) {
+    base = originalEnd;
+  } else if (isRenewal && wasFrozen) {
+    base = now;
+  } else {
+    base = now;
+  }
+
   const interval = plan?.price?.interval || 'month';
-  const periodEnd = interval === 'year'
-    ? new Date(startDate.getTime() + 365 * 24 * 60 * 60 * 1000)
-    : new Date(startDate.getTime() + 30 * 24 * 60 * 60 * 1000);
+  const periodEnd = new Date(base.getTime() + intervalToDays(interval) * 24 * 60 * 60 * 1000);
 
   const subscription = await Subscription.findOneAndUpdate(
     { organizationId },
     {
       organizationId,
-      planId: plan?._id || undefined,
+      planId: plan?._id || planId,
       status: 'active',
       paymentMethod,
-      currentPeriodStart: startDate,
+      frozenAt: null,
+      renewalInvoiceId: null,
+      lastRenewalReminderAt: null,
+      currentPeriodStart: base,
       currentPeriodEnd: periodEnd,
       currentUsage: { monthlyEmails: 0, apiKeys: 0, domains: 0, templates: 0 },
       cancelAtPeriodEnd: false,
@@ -41,7 +67,9 @@ async function activateSubscription(organizationId, planId, paymentMethod) {
   );
 
   await rateLimitService.invalidatePlanCache(organizationId.toString());
-  return { subscription, plan, startDate, periodEnd };
+  await invalidateSubscriptionState(organizationId.toString());
+
+  return { subscription, plan, startDate: base, periodEnd, wasFrozen };
 }
 
 const stripeWebhook = async (req, res) => {
@@ -87,7 +115,8 @@ const stripeWebhook = async (req, res) => {
       const { plan, startDate, periodEnd } = await activateSubscription(
         metaOrgId,
         metaPlanId || invoice?.planId,
-        'stripe'
+        'stripe',
+        invoice
       );
 
       const transaction = await Transaction.findOneAndUpdate(
@@ -116,26 +145,37 @@ const stripeWebhook = async (req, res) => {
         : await User.findOne({ organizationId: metaOrgId, role: 'owner' });
 
       if (user && user.email) {
-        await emailService.send(user.email, 'paymentReceived', {
-          firstName: user.firstName,
-          invoiceNumber: invoice?.invoiceNumber,
-          planName: plan?.name || invoice?.planName || 'Subscription',
-          amount: transaction?.amount,
-          currency: transaction?.currency,
-          method: 'Card (Stripe)',
-          reference: providerRef,
-          paidAt: new Date(),
-        }, { priority: 'high', organizationId: metaOrgId, userId: user._id })
-          .catch((err) => logger.error('Stripe paymentReceived email failed: ' + err.message));
+        if (invoice?.type === 'renewal') {
+          await emailService.send(user.email, 'subscriptionRenewed', {
+            firstName: user.firstName,
+            planName: plan?.name || invoice?.planName || 'Subscription',
+            periodStart: startDate,
+            periodEnd,
+            dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
+          }, { priority: 'high', organizationId: metaOrgId, userId: user._id })
+            .catch((err) => logger.error('Stripe subscriptionRenewed email failed: ' + err.message));
+        } else {
+          await emailService.send(user.email, 'paymentReceived', {
+            firstName: user.firstName,
+            invoiceNumber: invoice?.invoiceNumber,
+            planName: plan?.name || invoice?.planName || 'Subscription',
+            amount: transaction?.amount,
+            currency: transaction?.currency,
+            method: 'Card (Stripe)',
+            reference: providerRef,
+            paidAt: new Date(),
+          }, { priority: 'high', organizationId: metaOrgId, userId: user._id })
+            .catch((err) => logger.error('Stripe paymentReceived email failed: ' + err.message));
 
-        await emailService.send(user.email, 'subscriptionActivated', {
-          firstName: user.firstName,
-          planName: plan?.name || invoice?.planName || 'Subscription',
-          periodStart: startDate,
-          periodEnd,
-          dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
-        }, { priority: 'high', organizationId: metaOrgId, userId: user._id })
-          .catch((err) => logger.error('Stripe subscriptionActivated email failed: ' + err.message));
+          await emailService.send(user.email, 'subscriptionActivated', {
+            firstName: user.firstName,
+            planName: plan?.name || invoice?.planName || 'Subscription',
+            periodStart: startDate,
+            periodEnd,
+            dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
+          }, { priority: 'high', organizationId: metaOrgId, userId: user._id })
+            .catch((err) => logger.error('Stripe subscriptionActivated email failed: ' + err.message));
+        }
       }
 
       logger.info('Stripe payment confirmed: ' + providerRef + ' org=' + metaOrgId);
@@ -201,7 +241,8 @@ async function processMpesaCallback(payload, parsed) {
       const { plan, startDate, periodEnd } = await activateSubscription(
         transaction.organizationId,
         metaPlanId || invoice?.planId,
-        'mpesa'
+        'mpesa',
+        invoice
       );
 
       const user = transaction.userId
@@ -211,26 +252,37 @@ async function processMpesaCallback(payload, parsed) {
           : null;
 
       if (user && user.email) {
-        await emailService.send(user.email, 'paymentReceived', {
-          firstName: user.firstName,
-          invoiceNumber: invoice?.invoiceNumber || transaction.invoiceNumber,
-          planName: plan?.name || invoice?.planName || 'Subscription',
-          amount: transaction.convertedAmount || transaction.amount,
-          currency: transaction.currency,
-          method: 'M-Pesa STK Push',
-          reference: parsed.mpesaReceiptNumber,
-          paidAt: new Date(),
-        }, { priority: 'high', organizationId: transaction.organizationId, userId: user._id })
-          .catch((err) => logger.error('M-Pesa paymentReceived email failed: ' + err.message));
+        if (invoice?.type === 'renewal') {
+          await emailService.send(user.email, 'subscriptionRenewed', {
+            firstName: user.firstName,
+            planName: plan?.name || invoice?.planName || 'Subscription',
+            periodStart: startDate,
+            periodEnd,
+            dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
+          }, { priority: 'high', organizationId: transaction.organizationId, userId: user._id })
+            .catch((err) => logger.error('M-Pesa subscriptionRenewed email failed: ' + err.message));
+        } else {
+          await emailService.send(user.email, 'paymentReceived', {
+            firstName: user.firstName,
+            invoiceNumber: invoice?.invoiceNumber || transaction.invoiceNumber,
+            planName: plan?.name || invoice?.planName || 'Subscription',
+            amount: transaction.convertedAmount || transaction.amount,
+            currency: transaction.currency,
+            method: 'M-Pesa STK Push',
+            reference: parsed.mpesaReceiptNumber,
+            paidAt: new Date(),
+          }, { priority: 'high', organizationId: transaction.organizationId, userId: user._id })
+            .catch((err) => logger.error('M-Pesa paymentReceived email failed: ' + err.message));
 
-        await emailService.send(user.email, 'subscriptionActivated', {
-          firstName: user.firstName,
-          planName: plan?.name || invoice?.planName || 'Subscription',
-          periodStart: startDate,
-          periodEnd,
-          dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
-        }, { priority: 'high', organizationId: transaction.organizationId, userId: user._id })
-          .catch((err) => logger.error('M-Pesa subscriptionActivated email failed: ' + err.message));
+          await emailService.send(user.email, 'subscriptionActivated', {
+            firstName: user.firstName,
+            planName: plan?.name || invoice?.planName || 'Subscription',
+            periodStart: startDate,
+            periodEnd,
+            dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
+          }, { priority: 'high', organizationId: transaction.organizationId, userId: user._id })
+            .catch((err) => logger.error('M-Pesa subscriptionActivated email failed: ' + err.message));
+        }
       }
 
       logger.info('M-Pesa payment confirmed: ' + parsed.mpesaReceiptNumber + ' org=' + transaction.organizationId);

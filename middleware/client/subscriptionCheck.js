@@ -1,4 +1,5 @@
 const Subscription = require('../../models/client/Subscription');
+const Plan = require('../../models/client/Plan');
 const ApiKey = require('../../models/client/ApiKey');
 const Domain = require('../../models/client/Domain');
 const Sender = require('../../models/client/Sender');
@@ -10,6 +11,57 @@ const { getRedisClient } = require('../../config/redis');
 const logger = require('../../utils/logger');
 
 const CACHE_TTL = 60;
+const FREE_PLAN_CACHE_KEY = 'plan:free';
+
+async function getFreePlan() {
+  try {
+    const redis = getRedisClient();
+    const cached = await redis.get(FREE_PLAN_CACHE_KEY);
+    if (cached) return JSON.parse(cached);
+
+    const plan = await Plan.findOne({ tier: 'free', isActive: true }).lean();
+    if (plan) {
+      await redis.set(FREE_PLAN_CACHE_KEY, JSON.stringify(plan), 'EX', 300);
+    }
+    return plan;
+  } catch (error) {
+    logger.error('getFreePlan failed: ' + error.message);
+    return null;
+  }
+}
+
+async function resolveLimits(organizationId) {
+  const subscription = await Subscription.findOne({
+    organizationId,
+    status: { $in: ['active', 'trialing'] },
+    currentPeriodEnd: { $gt: new Date() },
+  }).populate('planId');
+
+  if (subscription?.planId?.limits) {
+    return subscription.planId.limits;
+  }
+
+  const freePlan = await getFreePlan();
+  if (freePlan?.limits) {
+    return freePlan.limits;
+  }
+
+  return {
+    monthlyEmails: 3000,
+    dailyEmails: 100,
+    hourlyEmails: 10,
+    apiKeys: 2,
+    domains: 1,
+    senders: 2,
+    templates: 5,
+    teamMembers: 1,
+    rateLimitPerMinute: 10,
+    rateLimitPerHour: 100,
+    logRetentionDays: 7,
+    attachmentSizeMB: 10,
+    maxRecipientsPerEmail: 50,
+  };
+}
 
 async function countUsage(organizationId, feature) {
   switch (feature) {
@@ -60,18 +112,7 @@ async function invalidateUsageCache(organizationId, feature) {
 const checkPlanLimit = (feature) => {
   return async (req, res, next) => {
     try {
-      const subscription = await Subscription.findOne({
-        organizationId: req.organizationId,
-        status: { $in: ['active', 'trialing'] },
-        currentPeriodEnd: { $gt: new Date() },
-      }).populate('planId');
-
-      if (!subscription) {
-        return next(new AppError('No active subscription', 403, 'PLAN_001'));
-      }
-
-      const plan = subscription.planId;
-      const limits = plan?.limits || {};
+      const limits = await resolveLimits(req.organizationId);
       const limit = limits[feature];
 
       if (typeof limit !== 'number') {
@@ -93,4 +134,4 @@ const checkPlanLimit = (feature) => {
   };
 };
 
-module.exports = { checkPlanLimit, getCurrentUsage, invalidateUsageCache };
+module.exports = { checkPlanLimit, getCurrentUsage, invalidateUsageCache, getFreePlan, resolveLimits };

@@ -932,6 +932,83 @@ async function dataExportReady({ firstName, downloadUrl, expiresHours = 24 }) {
   });
 }
 
+async function renewalInvoice({ firstName, invoiceNumber, planName, amount, currency, dueDate, invoiceUrl }) {
+  return render({
+    subject: `Your ${planName} plan renews in 5 days`,
+    headerColor: '#eab308',
+    headerTitle: 'Renewal due',
+    body: `
+      <h2>Hi ${esc(firstName || 'there')},</h2>
+      <p>Your <strong>${esc(planName)}</strong> plan renews on <strong>${esc(fmtDate(dueDate))}</strong>.</p>
+      <div class="box box-yellow">
+        ${dataRow('Invoice', invoiceNumber, true)}
+        ${dataRow('Plan', planName)}
+        ${dataRow('Amount', money(amount, currency))}
+        ${dataRow('Due by', fmtDateTime(dueDate))}
+      </div>
+      <p>Pay now to keep your service running without interruption.</p>
+      ${button(invoiceUrl, 'Pay Invoice')}
+    `,
+  });
+}
+
+async function subscriptionFrozen({ firstName, invoiceNumber, planName, amount, currency, invoiceUrl }) {
+  return render({
+    subject: `Your ${planName} services have been suspended`,
+    headerColor: '#dc2626',
+    headerTitle: 'Services suspended',
+    body: `
+      <h2>Hi ${esc(firstName || 'there')},</h2>
+      ${alertBox('danger', `Your <strong>${esc(planName)}</strong> plan has expired and services are now suspended.`)}
+      <p>Pay the invoice below to restore full access. Your API keys, domains, templates, and data are preserved.</p>
+      <div class="box box-red">
+        ${dataRow('Invoice', invoiceNumber, true)}
+        ${dataRow('Plan', planName)}
+        ${dataRow('Amount due', money(amount, currency))}
+      </div>
+      ${button(invoiceUrl, 'Pay Invoice')}
+      <p class="muted">Sending and write access are suspended. Reads are still available.</p>
+    `,
+  });
+}
+
+async function renewalReminder({ firstName, invoiceNumber, planName, amount, currency, invoiceUrl }) {
+  return render({
+    subject: `Reminder: invoice ${invoiceNumber} is unpaid`,
+    headerColor: '#eab308',
+    headerTitle: 'Payment reminder',
+    body: `
+      <h2>Hi ${esc(firstName || 'there')},</h2>
+      <p>Your <strong>${esc(planName)}</strong> services are still suspended.</p>
+      <div class="box box-yellow">
+        ${dataRow('Invoice', invoiceNumber, true)}
+        ${dataRow('Amount', money(amount, currency))}
+      </div>
+      <p>Pay the invoice to restore access.</p>
+      ${button(invoiceUrl, 'Pay Invoice')}
+    `,
+  });
+}
+
+async function subscriptionRenewed({ firstName, planName, periodStart, periodEnd, dashboardUrl }) {
+  return render({
+    subject: `Your ${planName} plan is active again`,
+    headerColor: '#059669',
+    headerTitle: 'Welcome back',
+    body: `
+      <h2>Hi ${esc(firstName || 'there')},</h2>
+      ${alertBox('success', `Payment received. Your <strong>${esc(planName)}</strong> plan is active again.`)}
+      <div class="box box-green">
+        ${dataRow('Plan', planName)}
+        ${dataRow('Starts', fmtDate(periodStart))}
+        ${dataRow('Renews', fmtDate(periodEnd))}
+      </div>
+      <p>All services have been restored. Sending and write access are enabled.</p>
+      ${button(dashboardUrl || DEFAULTS.clientUrl + '/dashboard', 'Go to Dashboard')}
+    `,
+  });
+}
+
 module.exports = {
   verifyEmail,
   welcome,
@@ -990,4 +1067,9 @@ module.exports = {
   contactConfirmation,
   legalUpdate,
   dataExportReady,
+
+  renewalInvoice,
+  subscriptionFrozen,
+  renewalReminder,
+  subscriptionRenewed,
 };

@@ -3,10 +3,11 @@ const { getApiKeys, createApiKey, revokeApiKey, updateApiKey } = require('../../
 const auth = require('../../middleware/common/auth');
 const tenantIsolation = require('../../middleware/common/tenantIsolation');
 const { checkPlanLimit } = require('../../middleware/client/subscriptionCheck');
+const { requireActiveSubscription } = require('../../middleware/client/requireActiveSubscription');
 
 router.get('/', auth, tenantIsolation, getApiKeys);
-router.post('/', auth, tenantIsolation, checkPlanLimit('apiKeys'), createApiKey);
-router.put('/:id', auth, tenantIsolation, updateApiKey);
-router.delete('/:id', auth, tenantIsolation, revokeApiKey);
+router.post('/', auth, tenantIsolation, requireActiveSubscription, checkPlanLimit('apiKeys'), createApiKey);
+router.put('/:id', auth, tenantIsolation, requireActiveSubscription, updateApiKey);
+router.delete('/:id', auth, tenantIsolation, requireActiveSubscription, revokeApiKey);
 
 module.exports = router;
