@@ -13,6 +13,37 @@ const rateLimitService = require('../../services/rateLimitService');
 const { AppError } = require('../../middleware/common/errorHandler');
 const logger = require('../../utils/logger');
 
+function summarizeSubscription(sub) {
+  if (!sub) {
+    return {
+      hasSubscription: false,
+      isFree: true,
+      status: 'free',
+      planName: 'Free',
+      planTier: 'free',
+      daysLeft: null,
+      currentPeriodEnd: null,
+    };
+  }
+
+  const tier = sub.planId?.tier || 'free';
+  const isFree = tier === 'free';
+  const periodEnd = sub.currentPeriodEnd ? new Date(sub.currentPeriodEnd) : null;
+  const now = new Date();
+  const msLeft = periodEnd ? periodEnd.getTime() - now.getTime() : 0;
+  const daysLeft = periodEnd ? Math.max(0, Math.ceil(msLeft / (24 * 60 * 60 * 1000))) : null;
+
+  return {
+    hasSubscription: true,
+    isFree,
+    status: sub.status,
+    planName: sub.planId?.name || 'Free',
+    planTier: tier,
+    daysLeft: isFree ? null : daysLeft,
+    currentPeriodEnd: periodEnd,
+  };
+}
+
 const getUsers = async (req, res, next) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -29,14 +60,44 @@ const getUsers = async (req, res, next) => {
     if (status === 'active') filter.isActive = true;
     if (status === 'suspended') filter.isActive = false;
     if (role) filter.role = role;
+
     const skip = (page - 1) * limit;
     const [users, total] = await Promise.all([
-      User.find(filter).populate('organizationId', 'name email').sort(sort).skip(skip).limit(limit),
+      User.find(filter).populate('organizationId', 'name email').sort(sort).skip(skip).limit(limit).lean(),
       User.countDocuments(filter),
     ]);
+
+    const orgIds = [...new Set(users.map((u) => u.organizationId?._id?.toString()).filter(Boolean))];
+
+    const subs = await Subscription.find({ organizationId: { $in: orgIds } })
+      .populate('planId', 'name tier price')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const subByOrg = {};
+    for (const s of subs) {
+      const key = s.organizationId?.toString();
+      if (!key) continue;
+      if (!subByOrg[key]) subByOrg[key] = s;
+      const priority = { frozen: 0, active: 1, past_due: 2, trialing: 3 };
+      const current = subByOrg[key];
+      if ((priority[s.status] ?? 9) < (priority[current.status] ?? 9)) {
+        subByOrg[key] = s;
+      }
+    }
+
+    const usersWithSub = users.map((u) => {
+      const key = u.organizationId?._id?.toString();
+      const sub = key ? subByOrg[key] : null;
+      return {
+        ...u,
+        subscription: summarizeSubscription(sub),
+      };
+    });
+
     res.status(200).json({
       success: true,
-      data: users,
+      data: usersWithSub,
       pagination: {
         page, limit, total,
         pages: Math.ceil(total / limit),
@@ -67,7 +128,10 @@ const getUserById = async (req, res, next) => {
       recentEmails,
       recentTransactions,
     ] = await Promise.all([
-      Subscription.findOne({ organizationId, status: { $in: ['active', 'past_due', 'trialing'] } })
+      Subscription.findOne({
+        organizationId,
+        status: { $in: ['active', 'past_due', 'trialing', 'frozen'] },
+      })
         .populate('planId')
         .sort({ createdAt: -1 })
         .lean(),
@@ -103,17 +167,9 @@ const getUserById = async (req, res, next) => {
     ]);
 
     const emailCounts = {
-      sent: 0,
-      delivered: 0,
-      opened: 0,
-      clicked: 0,
-      queued: 0,
-      processing: 0,
-      failed: 0,
-      bounced: 0,
-      spam: 0,
-      deferred: 0,
-      total: 0,
+      sent: 0, delivered: 0, opened: 0, clicked: 0,
+      queued: 0, processing: 0, failed: 0, bounced: 0,
+      spam: 0, deferred: 0, total: 0,
     };
     for (const row of emailStats) {
       emailCounts[row._id] = row.count;
@@ -134,12 +190,14 @@ const getUserById = async (req, res, next) => {
       const now = new Date();
       const periodEnd = subscription.currentPeriodEnd ? new Date(subscription.currentPeriodEnd) : null;
       const msLeft = periodEnd ? periodEnd.getTime() - now.getTime() : 0;
-      const daysLeft = msLeft > 0 ? Math.ceil(msLeft / (24 * 60 * 60 * 1000)) : 0;
+      const daysLeft = periodEnd ? Math.max(0, Math.ceil(msLeft / (24 * 60 * 60 * 1000))) : 0;
+      const isFree = plan.tier === 'free';
 
       planBlock = {
         planId: plan._id,
         name: plan.name,
         tier: plan.tier,
+        isFree,
         price: plan.price,
         limits: plan.limits,
         features: plan.features,
@@ -148,7 +206,8 @@ const getUserById = async (req, res, next) => {
         currentPeriodStart: subscription.currentPeriodStart,
         currentPeriodEnd: subscription.currentPeriodEnd,
         cancelAtPeriodEnd: subscription.cancelAtPeriodEnd,
-        daysLeft,
+        frozenAt: subscription.frozenAt || null,
+        daysLeft: isFree ? null : daysLeft,
       };
 
       let currentUsage = { daily: 0, monthly: 0, smsDaily: 0, smsMonthly: 0 };
@@ -330,6 +389,7 @@ const deleteOrganization = async (req, res, next) => {
       { name: 'users', label: 'Users' },
       { name: 'subscriptions', label: 'Subscriptions' },
       { name: 'transactions', label: 'Transactions' },
+      { name: 'invoices', label: 'Invoices' },
       { name: 'apikeys', label: 'API Keys' },
       { name: 'emaillogs', label: 'Email Logs' },
       { name: 'templates', label: 'Templates' },

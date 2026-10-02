@@ -5,18 +5,24 @@ const Plan = require('../../models/client/Plan');
 const User = require('../../models/client/User');
 const rateLimitService = require('../../services/rateLimitService');
 const emailService = require('../../services/emailService');
+const { invalidateSubscriptionState } = require('../../middleware/client/requireActiveSubscription');
 const { AppError } = require('../../middleware/common/errorHandler');
 const logger = require('../../utils/logger');
+
+function intervalToDays(interval) {
+  return interval === 'year' ? 365 : 30;
+}
 
 const getInvoices = async (req, res, next) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
-    const { status, method, search, sort = '-createdAt' } = req.query;
+    const { status, method, type, search, sort = '-createdAt' } = req.query;
 
     const filter = {};
     if (status) filter.status = status;
     if (method) filter.paymentMethod = method;
+    if (type) filter.type = type;
     if (search) {
       filter.$or = [
         { invoiceNumber: { $regex: search, $options: 'i' } },
@@ -71,6 +77,7 @@ const confirmInvoice = async (req, res, next) => {
     if (invoice.status !== 'sent') return next(new AppError('Invoice is not confirmable', 400, 'VALIDATION_001'));
 
     const plan = await Plan.findById(invoice.planId);
+    const isRenewal = invoice.type === 'renewal';
 
     const transaction = await Transaction.create({
       organizationId: invoice.organizationId,
@@ -85,7 +92,9 @@ const confirmInvoice = async (req, res, next) => {
         transactionId: reference,
         receiptNumber: reference,
       },
-      description: invoice.planName + ' Subscription (manual confirm)',
+      description: invoice.planName + ' Subscription (admin confirm)',
+      invoiceId: invoice._id,
+      invoiceNumber: invoice.invoiceNumber,
       metadata: { planId: invoice.planId, invoiceId: invoice._id, invoiceNumber: invoice.invoiceNumber },
     });
 
@@ -99,11 +108,19 @@ const confirmInvoice = async (req, res, next) => {
     invoice.transactionId = transaction._id;
     await invoice.save();
 
-    const startDate = new Date();
+    const existing = await Subscription.findOne({ organizationId: invoice.organizationId });
+    const now = new Date();
+
+    const canExtend = isRenewal
+      && existing
+      && existing.currentPeriodEnd
+      && existing.currentPeriodEnd > now
+      && existing.planId
+      && existing.planId.toString() === invoice.planId.toString();
+
+    const base = canExtend ? existing.currentPeriodEnd : now;
     const interval = plan?.price?.interval || invoice.planInterval || 'month';
-    const periodEnd = interval === 'year'
-      ? new Date(startDate.getTime() + 365 * 24 * 60 * 60 * 1000)
-      : new Date(startDate.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const periodEnd = new Date(base.getTime() + intervalToDays(interval) * 24 * 60 * 60 * 1000);
 
     await Subscription.findOneAndUpdate(
       { organizationId: invoice.organizationId },
@@ -112,7 +129,10 @@ const confirmInvoice = async (req, res, next) => {
         planId: invoice.planId,
         status: 'active',
         paymentMethod: invoice.paymentMethod || 'manual',
-        currentPeriodStart: startDate,
+        frozenAt: null,
+        renewalInvoiceId: null,
+        lastRenewalReminderAt: null,
+        currentPeriodStart: base,
         currentPeriodEnd: periodEnd,
         currentUsage: { monthlyEmails: 0, apiKeys: 0, domains: 0, templates: 0 },
         cancelAtPeriodEnd: false,
@@ -121,33 +141,45 @@ const confirmInvoice = async (req, res, next) => {
     );
 
     await rateLimitService.invalidatePlanCache(invoice.organizationId.toString());
+    await invalidateSubscriptionState(invoice.organizationId.toString());
 
     const user = await User.findById(invoice.userId);
 
     if (user && user.email) {
-      await emailService.send(user.email, 'paymentConfirmed', {
-        firstName: user.firstName,
-        invoiceNumber: invoice.invoiceNumber,
-        planName: invoice.planName,
-        amount: invoice.total,
-        currency: invoice.currency,
-        method: invoice.paymentMethod || 'manual',
-        reference,
-        confirmedAt: new Date(),
-      }, { priority: 'high', organizationId: invoice.organizationId, userId: user._id })
-        .catch((err) => logger.error('paymentConfirmed email failed: ' + err.message));
+      if (isRenewal) {
+        await emailService.send(user.email, 'subscriptionRenewed', {
+          firstName: user.firstName,
+          planName: invoice.planName,
+          periodStart: base,
+          periodEnd,
+          dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
+        }, { priority: 'high', organizationId: invoice.organizationId, userId: user._id })
+          .catch((err) => logger.error('subscriptionRenewed email failed: ' + err.message));
+      } else {
+        await emailService.send(user.email, 'paymentConfirmed', {
+          firstName: user.firstName,
+          invoiceNumber: invoice.invoiceNumber,
+          planName: invoice.planName,
+          amount: invoice.total,
+          currency: invoice.currency,
+          method: invoice.paymentMethod || 'manual',
+          reference,
+          confirmedAt: new Date(),
+        }, { priority: 'high', organizationId: invoice.organizationId, userId: user._id })
+          .catch((err) => logger.error('paymentConfirmed email failed: ' + err.message));
 
-      await emailService.send(user.email, 'subscriptionActivated', {
-        firstName: user.firstName,
-        planName: invoice.planName,
-        periodStart: startDate,
-        periodEnd,
-        dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
-      }, { priority: 'high', organizationId: invoice.organizationId, userId: user._id })
-        .catch((err) => logger.error('subscriptionActivated email failed: ' + err.message));
+        await emailService.send(user.email, 'subscriptionActivated', {
+          firstName: user.firstName,
+          planName: invoice.planName,
+          periodStart: base,
+          periodEnd,
+          dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
+        }, { priority: 'high', organizationId: invoice.organizationId, userId: user._id })
+          .catch((err) => logger.error('subscriptionActivated email failed: ' + err.message));
+      }
     }
 
-    logger.info('Admin confirmed invoice ' + invoice.invoiceNumber + ' ref=' + reference);
+    logger.info('Admin confirmed invoice ' + invoice.invoiceNumber + ' ref=' + reference + ' type=' + invoice.type);
     res.status(200).json({ success: true, message: 'Invoice confirmed and subscription activated', invoice });
   } catch (error) { next(error); }
 };
@@ -175,7 +207,7 @@ const rejectInvoice = async (req, res, next) => {
         .catch((err) => logger.error('paymentRejected email failed: ' + err.message));
     }
 
-    logger.info('Admin rejected invoice ' + invoice.invoiceNumber);
+    logger.info('Admin rejected invoice ' + invoice.invoiceNumber + ' type=' + invoice.type);
     res.status(200).json({ success: true, message: 'Invoice rejected', invoice });
   } catch (error) { next(error); }
 };

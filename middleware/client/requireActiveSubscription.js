@@ -6,39 +6,39 @@ const logger = require('../../utils/logger');
 const CACHE_TTL = 30;
 const CACHE_PREFIX = 'sub:state:';
 
+async function fetchStateFromDB(organizationId) {
+  const sub = await Subscription.findOne({ organizationId })
+    .populate({ path: 'planId', select: 'tier name', model: 'Plan' })
+    .lean();
+
+  return {
+    hasSub: !!sub,
+    status: sub?.status || null,
+    tier: sub?.planId?.tier || null,
+    planName: sub?.planId?.name || null,
+    currentPeriodEnd: sub?.currentPeriodEnd || null,
+  };
+}
+
 async function getSubscriptionState(organizationId) {
+  let redis;
   try {
-    const redis = getRedisClient();
+    redis = getRedisClient();
+  } catch {
+    return fetchStateFromDB(organizationId);
+  }
+
+  try {
     const key = CACHE_PREFIX + organizationId;
     const cached = await redis.get(key);
     if (cached) return JSON.parse(cached);
 
-    const sub = await Subscription.findOne({ organizationId })
-      .populate('planId', 'tier name')
-      .lean();
-
-    const state = {
-      hasSub: !!sub,
-      status: sub?.status || null,
-      tier: sub?.planId?.tier || null,
-      planName: sub?.planId?.name || null,
-      currentPeriodEnd: sub?.currentPeriodEnd || null,
-    };
-
+    const state = await fetchStateFromDB(organizationId);
     await redis.set(key, JSON.stringify(state), 'EX', CACHE_TTL);
     return state;
   } catch (error) {
     logger.error('getSubscriptionState failed: ' + error.message);
-    const sub = await Subscription.findOne({ organizationId })
-      .populate('planId', 'tier name')
-      .lean();
-    return {
-      hasSub: !!sub,
-      status: sub?.status || null,
-      tier: sub?.planId?.tier || null,
-      planName: sub?.planId?.name || null,
-      currentPeriodEnd: sub?.currentPeriodEnd || null,
-    };
+    return fetchStateFromDB(organizationId);
   }
 }
 

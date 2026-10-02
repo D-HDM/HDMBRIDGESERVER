@@ -3,6 +3,7 @@ require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') }
 const mongoose = require('mongoose');
 const cron = require('node-cron');
 const connectDB = require('../config/database');
+const { connectRedis, getRedisClient } = require('../config/redis');
 const Subscription = require('../models/client/Subscription');
 const Plan = require('../models/client/Plan');
 const Invoice = require('../models/client/Invoice');
@@ -14,6 +15,15 @@ const { invalidateSubscriptionState } = require('../middleware/client/requireAct
 const logger = require('../utils/logger');
 
 const REMINDER_INTERVAL_MS = 3 * 24 * 60 * 60 * 1000;
+
+async function ensureRedis() {
+  try {
+    const redis = getRedisClient();
+    await redis.ping();
+  } catch {
+    await connectRedis();
+  }
+}
 
 async function getFreePlanId() {
   const free = await Plan.findOne({ tier: 'free' }).select('_id').lean();
@@ -292,6 +302,8 @@ async function startWorker() {
     if (mongoose.connection.readyState !== 1) {
       await connectDB();
     }
+
+    await ensureRedis();
 
     if (task) {
       logger.warn('[subscriptionWorker] Already running');
