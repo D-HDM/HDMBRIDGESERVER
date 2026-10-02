@@ -36,6 +36,23 @@ async function getOwner(organizationId) {
     .lean();
 }
 
+async function ensureInvoiceForSub(sub, owner) {
+  let invoice = sub.renewalInvoiceId
+    ? await Invoice.findById(sub.renewalInvoiceId).lean()
+    : null;
+
+  if (invoice && invoice.status !== 'failed' && invoice.status !== 'expired') {
+    return { invoice, created: false };
+  }
+
+  const result = await invoiceService.generateRenewalInvoice(sub, owner);
+  await Subscription.updateOne(
+    { _id: sub._id },
+    { $set: { renewalInvoiceId: result.invoice._id } }
+  );
+  return { invoice: result.invoice, created: result.created };
+}
+
 async function pass1GenerateRenewalInvoices(now, freePlanId) {
   const from = new Date(now.getTime() + 4 * 24 * 60 * 60 * 1000);
   const to = new Date(now.getTime() + 6 * 24 * 60 * 60 * 1000);
@@ -83,6 +100,7 @@ async function pass1GenerateRenewalInvoices(now, freePlanId) {
             invoiceUrl,
           }, {
             priority: 'high',
+            source: 'system',
             organizationId: sub.organizationId,
             userId: owner._id,
           }).catch((err) => logger.error('[subscriptionWorker] renewalInvoice email failed: ' + err.message));
@@ -98,43 +116,40 @@ async function pass1GenerateRenewalInvoices(now, freePlanId) {
 }
 
 async function pass2FreezeExpired(now, freePlanId) {
-  const query = {
+  const activeQuery = {
     status: 'active',
     currentPeriodEnd: { $lte: now },
   };
-  if (freePlanId) query.planId = { $ne: freePlanId };
+  if (freePlanId) activeQuery.planId = { $ne: freePlanId };
 
-  const expired = await Subscription.find(query).populate('planId').lean();
+  const [expired, brokenFrozen] = await Promise.all([
+    Subscription.find(activeQuery).populate('planId').lean(),
+    Subscription.find({
+      status: 'frozen',
+      ...(freePlanId ? { planId: { $ne: freePlanId } } : {}),
+      $or: [
+        { renewalInvoiceId: null },
+        { renewalInvoiceId: { $exists: false } },
+      ],
+    }).populate('planId').lean(),
+  ]);
 
-  if (expired.length === 0) {
-    logger.info('[subscriptionWorker] Pass 2: no expired subs to freeze');
-    return { frozen: 0 };
+  const total = expired.length + brokenFrozen.length;
+
+  if (total === 0) {
+    logger.info('[subscriptionWorker] Pass 2: no expired subs to freeze, no broken frozen subs to heal');
+    return { frozen: 0, healed: 0 };
   }
 
   let frozen = 0;
+  let healed = 0;
 
   for (const sub of expired) {
     try {
       if (!sub.planId) continue;
 
-      let invoice = sub.renewalInvoiceId
-        ? await Invoice.findById(sub.renewalInvoiceId).lean()
-        : null;
-
-      if (invoice && invoice.status === 'paid') {
-        logger.info('[subscriptionWorker] Pass 2: sub ' + sub._id + ' already paid, skipping');
-        continue;
-      }
-
-      if (!invoice) {
-        const owner = await getOwner(sub.organizationId);
-        const result = await invoiceService.generateRenewalInvoice(sub, owner);
-        invoice = result.invoice;
-        await Subscription.updateOne(
-          { _id: sub._id },
-          { $set: { renewalInvoiceId: invoice._id } }
-        );
-      }
+      const owner = await getOwner(sub.organizationId);
+      const { invoice } = await ensureInvoiceForSub(sub, owner);
 
       await Subscription.updateOne(
         { _id: sub._id },
@@ -150,8 +165,6 @@ async function pass2FreezeExpired(now, freePlanId) {
       await rateLimitService.invalidatePlanCache(sub.organizationId.toString());
       await invalidateSubscriptionState(sub.organizationId.toString());
 
-      const owner = await getOwner(sub.organizationId);
-
       if (owner?.email && invoice) {
         const invoiceUrl = (process.env.CLIENT_URL || '') + '/invoice/' + invoice.invoiceNumber;
         await emailService.send(owner.email, 'subscriptionFrozen', {
@@ -163,6 +176,7 @@ async function pass2FreezeExpired(now, freePlanId) {
           invoiceUrl,
         }, {
           priority: 'high',
+          source: 'system',
           organizationId: sub.organizationId,
           userId: owner._id,
         }).catch((err) => logger.error('[subscriptionWorker] subscriptionFrozen email failed: ' + err.message));
@@ -171,12 +185,46 @@ async function pass2FreezeExpired(now, freePlanId) {
       frozen += 1;
       logger.info('[subscriptionWorker] Froze sub ' + sub._id + ' org=' + sub.organizationId);
     } catch (err) {
-      logger.error('[subscriptionWorker] Pass 2 failed for sub ' + sub._id + ': ' + err.message);
+      logger.error('[subscriptionWorker] Pass 2 freeze failed for sub ' + sub._id + ': ' + err.message);
     }
   }
 
-  logger.info('[subscriptionWorker] Pass 2: froze ' + frozen + ' subscriptions');
-  return { frozen };
+  for (const sub of brokenFrozen) {
+    try {
+      if (!sub.planId) continue;
+
+      const owner = await getOwner(sub.organizationId);
+      const { invoice, created } = await ensureInvoiceForSub(sub, owner);
+
+      await rateLimitService.invalidatePlanCache(sub.organizationId.toString());
+      await invalidateSubscriptionState(sub.organizationId.toString());
+
+      if (created && owner?.email && invoice) {
+        const invoiceUrl = (process.env.CLIENT_URL || '') + '/invoice/' + invoice.invoiceNumber;
+        await emailService.send(owner.email, 'subscriptionFrozen', {
+          firstName: owner.firstName,
+          invoiceNumber: invoice.invoiceNumber,
+          planName: sub.planId.name,
+          amount: invoice.total,
+          currency: invoice.currency,
+          invoiceUrl,
+        }, {
+          priority: 'high',
+          source: 'system',
+          organizationId: sub.organizationId,
+          userId: owner._id,
+        }).catch((err) => logger.error('[subscriptionWorker] subscriptionFrozen email failed: ' + err.message));
+      }
+
+      healed += 1;
+      logger.info('[subscriptionWorker] Healed frozen sub ' + sub._id + ' org=' + sub.organizationId);
+    } catch (err) {
+      logger.error('[subscriptionWorker] Pass 2 heal failed for sub ' + sub._id + ': ' + err.message);
+    }
+  }
+
+  logger.info('[subscriptionWorker] Pass 2: froze ' + frozen + ', healed ' + healed);
+  return { frozen, healed };
 }
 
 async function pass3RemindFrozen(now, freePlanId) {
@@ -205,12 +253,11 @@ async function pass3RemindFrozen(now, freePlanId) {
     try {
       if (!sub.planId) continue;
 
-      const invoice = sub.renewalInvoiceId
-        ? await Invoice.findById(sub.renewalInvoiceId).lean()
-        : null;
+      const owner = await getOwner(sub.organizationId);
+      const { invoice } = await ensureInvoiceForSub(sub, owner);
 
       if (!invoice) {
-        logger.warn('[subscriptionWorker] Pass 3: frozen sub without invoice ' + sub._id);
+        logger.warn('[subscriptionWorker] Pass 3: could not resolve invoice for sub ' + sub._id);
         continue;
       }
 
@@ -232,8 +279,6 @@ async function pass3RemindFrozen(now, freePlanId) {
         continue;
       }
 
-      const owner = await getOwner(sub.organizationId);
-
       if (owner?.email) {
         const invoiceUrl = (process.env.CLIENT_URL || '') + '/invoice/' + invoice.invoiceNumber;
         await emailService.send(owner.email, 'renewalReminder', {
@@ -245,6 +290,7 @@ async function pass3RemindFrozen(now, freePlanId) {
           invoiceUrl,
         }, {
           priority: 'normal',
+          source: 'system',
           organizationId: sub.organizationId,
           userId: owner._id,
         }).catch((err) => logger.error('[subscriptionWorker] renewalReminder email failed: ' + err.message));
@@ -278,7 +324,7 @@ async function runOnce() {
     }),
     pass2FreezeExpired(now, freePlanId).catch((err) => {
       logger.error('[subscriptionWorker] Pass 2 threw: ' + err.message);
-      return { frozen: 0 };
+      return { frozen: 0, healed: 0 };
     }),
     pass3RemindFrozen(now, freePlanId).catch((err) => {
       logger.error('[subscriptionWorker] Pass 3 threw: ' + err.message);
@@ -289,6 +335,7 @@ async function runOnce() {
   logger.info('[subscriptionWorker] Run complete: ' + JSON.stringify({
     invoices: p1.generated,
     frozen: p2.frozen,
+    healed: p2.healed,
     reminded: p3.reminded,
   }));
 

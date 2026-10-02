@@ -27,9 +27,11 @@ class Helpers {
     return `${maskedName}@${domain}`;
   }
 
-  static paginate(query, page = 1, limit = 20) {
-    const skip = (page - 1) * limit;
-    return { skip, limit, page };
+  static paginate(page = 1, limit = 20) {
+    const pageNum = parseInt(page) || 1;
+    const limitNum = parseInt(limit) || 20;
+    const skip = (pageNum - 1) * limitNum;
+    return { skip, limit: limitNum, page: pageNum };
   }
 
   static buildPaginationResponse(data, total, page, limit) {

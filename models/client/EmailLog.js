@@ -16,6 +16,15 @@ const emailLogSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'ApiKey',
     },
+    apiKeyName: {
+      type: String,
+    },
+    source: {
+      type: String,
+      enum: ['api', 'dashboard', 'system', 'broadcast'],
+      default: 'api',
+      index: true,
+    },
     messageId: {
       type: String,
       required: true,
@@ -25,6 +34,9 @@ const emailLogSchema = new mongoose.Schema(
     templateId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Template',
+    },
+    templateKey: {
+      type: String,
     },
     from: {
       email: { type: String, required: true },
@@ -105,6 +117,8 @@ const emailLogSchema = new mongoose.Schema(
 );
 
 emailLogSchema.index({ organizationId: 1, createdAt: -1 });
+emailLogSchema.index({ organizationId: 1, source: 1, createdAt: -1 });
+emailLogSchema.index({ organizationId: 1, apiKeyId: 1, createdAt: -1 });
 emailLogSchema.index({ status: 1, createdAt: -1 });
 emailLogSchema.index({ 'to.email': 1 });
 emailLogSchema.index({ messageId: 1 });

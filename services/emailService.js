@@ -73,6 +73,44 @@ class EmailService {
     return trackedHtml + openPixel;
   }
 
+  async writeLog(data) {
+    try {
+      await EmailLog.updateOne(
+        { messageId: data.messageId },
+        {
+          $setOnInsert: {
+            messageId: data.messageId,
+            organizationId: data.organizationId,
+            userId: data.userId || null,
+            apiKeyId: data.apiKeyId || null,
+            apiKeyName: data.apiKeyName || null,
+            source: data.source || 'api',
+            templateId: data.templateId || null,
+            templateKey: data.templateKey || null,
+            from: { email: data.from, name: data.fromName || null },
+            to: { email: data.to, name: data.toName || null },
+            replyTo: data.replyTo || null,
+            subject: data.subject,
+            htmlBody: data.htmlBody || null,
+            textBody: data.textBody || null,
+            status: 'queued',
+            priority: data.priority || 'normal',
+            tags: data.tags || [],
+            attachments: (data.attachments || []).map((a) => ({
+              filename: a.filename,
+              size: a.size || null,
+              mimeType: a.type || null,
+            })),
+          },
+        },
+        { upsert: true }
+      );
+    } catch (err) {
+      if (err.code === 11000) return;
+      logger.error('emailService.writeLog failed: ' + err.message);
+    }
+  }
+
   async send(to, templateKey, data = {}, options = {}) {
     const templates = require('../templates/emailTemplates');
     const render = templates[templateKey];
@@ -87,6 +125,27 @@ class EmailService {
     const priority = options.priority || 'normal';
     const from = options.from || process.env.SYSTEM_FROM_EMAIL || process.env.SMTP_FROM_EMAIL;
     const fromName = options.fromName || process.env.SYSTEM_FROM_NAME || process.env.SMTP_FROM_NAME || 'HDM BRIDGE';
+    const source = options.source || 'system';
+
+    if (options.organizationId) {
+      await this.writeLog({
+        messageId,
+        organizationId: options.organizationId,
+        userId: options.userId,
+        apiKeyId: options.apiKeyId,
+        apiKeyName: options.apiKeyName,
+        source,
+        templateKey,
+        from,
+        fromName,
+        to,
+        subject: tpl.subject,
+        htmlBody: tpl.html,
+        textBody: tpl.text,
+        priority,
+        tags: options.tags || ['system'],
+      });
+    }
 
     const job = await queueService.addToQueue(
       {
@@ -108,7 +167,7 @@ class EmailService {
       priority
     );
 
-    logger.info('System email queued: ' + templateKey + ' -> ' + to + ' (' + messageId + ')');
+    logger.info('System email queued: ' + templateKey + ' -> ' + to + ' (' + messageId + ') source=' + source);
     return { success: true, messageId, jobId: job?.id };
   }
 

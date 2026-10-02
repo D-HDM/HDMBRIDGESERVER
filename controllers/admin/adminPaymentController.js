@@ -6,8 +6,13 @@ const stripeService = require('../../services/stripeService');
 const paypalService = require('../../services/paypalService');
 const emailService = require('../../services/emailService');
 const rateLimitService = require('../../services/rateLimitService');
+const { invalidateSubscriptionState } = require('../../middleware/client/requireActiveSubscription');
 const { AppError } = require('../../middleware/common/errorHandler');
 const logger = require('../../utils/logger');
+
+function intervalToDays(interval) {
+  return interval === 'year' ? 365 : 30;
+}
 
 const getTransactions = async (req, res, next) => {
   try {
@@ -184,11 +189,19 @@ const approvePayment = async (req, res, next) => {
       });
     }
 
-    const startDate = new Date();
+    const existing = await Subscription.findOne({ organizationId: orgId });
+    const now = new Date();
     const interval = plan?.price?.interval || 'month';
-    const periodEnd = interval === 'year'
-      ? new Date(startDate.getTime() + 365 * 24 * 60 * 60 * 1000)
-      : new Date(startDate.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+    const canExtend = existing
+      && existing.currentPeriodEnd
+      && existing.currentPeriodEnd > now
+      && existing.planId
+      && plan
+      && existing.planId.toString() === plan._id.toString();
+
+    const base = canExtend ? existing.currentPeriodEnd : now;
+    const periodEnd = new Date(base.getTime() + intervalToDays(interval) * 24 * 60 * 60 * 1000);
 
     await Subscription.findOneAndUpdate(
       { organizationId: orgId },
@@ -197,7 +210,10 @@ const approvePayment = async (req, res, next) => {
         planId: plan?._id || undefined,
         status: 'active',
         paymentMethod: transaction.paymentMethod || 'manual',
-        currentPeriodStart: startDate,
+        frozenAt: null,
+        renewalInvoiceId: null,
+        lastRenewalReminderAt: null,
+        currentPeriodStart: base,
         currentPeriodEnd: periodEnd,
         currentUsage: { monthlyEmails: 0, apiKeys: 0, domains: 0, templates: 0 },
         cancelAtPeriodEnd: false,
@@ -206,6 +222,7 @@ const approvePayment = async (req, res, next) => {
     );
 
     await rateLimitService.invalidatePlanCache(orgId.toString());
+    await invalidateSubscriptionState(orgId.toString());
 
     const user = transaction.userId;
 
@@ -219,17 +236,17 @@ const approvePayment = async (req, res, next) => {
         method: transaction.paymentMethod || 'manual',
         reference: transaction.paymentProvider?.transactionId || transaction.paymentProvider?.receiptNumber,
         confirmedAt: new Date(),
-      }, { priority: 'high', organizationId: orgId, userId: user._id })
-        .catch((err) => logger.error('Payment confirmed email failed: ' + err.message));
+      }, { priority: 'high', source: 'system', organizationId: orgId, userId: user._id })
+        .catch((err) => logger.error('paymentConfirmed email failed: ' + err.message));
 
       await emailService.send(user.email, 'subscriptionActivated', {
         firstName: user.firstName,
         planName: plan?.name || 'Subscription',
-        periodStart: startDate,
+        periodStart: base,
         periodEnd,
         dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
-      }, { priority: 'high', organizationId: orgId, userId: user._id })
-        .catch((err) => logger.error('Subscription activated email failed: ' + err.message));
+      }, { priority: 'high', source: 'system', organizationId: orgId, userId: user._id })
+        .catch((err) => logger.error('subscriptionActivated email failed: ' + err.message));
     }
 
     logger.info('Admin approved payment: ' + transaction._id + ' org=' + orgId);
@@ -264,8 +281,8 @@ const rejectPayment = async (req, res, next) => {
         invoiceNumber: transaction.invoiceNumber,
         reason: reason || 'Payment was not confirmed',
         supportUrl: (process.env.CLIENT_URL || '') + '/support',
-      }, { priority: 'normal', organizationId: transaction.organizationId, userId: user._id })
-        .catch((err) => logger.error('Payment rejected email failed: ' + err.message));
+      }, { priority: 'normal', source: 'system', organizationId: transaction.organizationId, userId: user._id })
+        .catch((err) => logger.error('paymentRejected email failed: ' + err.message));
     }
 
     logger.info('Admin rejected payment: ' + transaction._id);

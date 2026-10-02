@@ -119,7 +119,11 @@ const confirmInvoice = async (req, res, next) => {
       && existing.planId.toString() === invoice.planId.toString();
 
     const base = canExtend ? existing.currentPeriodEnd : now;
-    const interval = plan?.price?.interval || invoice.planInterval || 'month';
+
+    const interval = invoice.planInterval
+      || plan?.price?.interval
+      || 'month';
+
     const periodEnd = new Date(base.getTime() + intervalToDays(interval) * 24 * 60 * 60 * 1000);
 
     await Subscription.findOneAndUpdate(
@@ -153,7 +157,7 @@ const confirmInvoice = async (req, res, next) => {
           periodStart: base,
           periodEnd,
           dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
-        }, { priority: 'high', organizationId: invoice.organizationId, userId: user._id })
+        }, { priority: 'high', source: 'system', organizationId: invoice.organizationId, userId: user._id })
           .catch((err) => logger.error('subscriptionRenewed email failed: ' + err.message));
       } else {
         await emailService.send(user.email, 'paymentConfirmed', {
@@ -165,7 +169,7 @@ const confirmInvoice = async (req, res, next) => {
           method: invoice.paymentMethod || 'manual',
           reference,
           confirmedAt: new Date(),
-        }, { priority: 'high', organizationId: invoice.organizationId, userId: user._id })
+        }, { priority: 'high', source: 'system', organizationId: invoice.organizationId, userId: user._id })
           .catch((err) => logger.error('paymentConfirmed email failed: ' + err.message));
 
         await emailService.send(user.email, 'subscriptionActivated', {
@@ -174,12 +178,12 @@ const confirmInvoice = async (req, res, next) => {
           periodStart: base,
           periodEnd,
           dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
-        }, { priority: 'high', organizationId: invoice.organizationId, userId: user._id })
+        }, { priority: 'high', source: 'system', organizationId: invoice.organizationId, userId: user._id })
           .catch((err) => logger.error('subscriptionActivated email failed: ' + err.message));
       }
     }
 
-    logger.info('Admin confirmed invoice ' + invoice.invoiceNumber + ' ref=' + reference + ' type=' + invoice.type);
+    logger.info('Admin confirmed invoice ' + invoice.invoiceNumber + ' ref=' + reference + ' type=' + invoice.type + ' interval=' + interval);
     res.status(200).json({ success: true, message: 'Invoice confirmed and subscription activated', invoice });
   } catch (error) { next(error); }
 };
@@ -203,7 +207,7 @@ const rejectInvoice = async (req, res, next) => {
         invoiceNumber: invoice.invoiceNumber,
         reason: reason || 'Payment was not confirmed',
         supportUrl: (process.env.CLIENT_URL || '') + '/support',
-      }, { priority: 'normal', organizationId: invoice.organizationId, userId: user._id })
+      }, { priority: 'normal', source: 'system', organizationId: invoice.organizationId, userId: user._id })
         .catch((err) => logger.error('paymentRejected email failed: ' + err.message));
     }
 

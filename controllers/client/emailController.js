@@ -49,7 +49,7 @@ async function enforceSendLimits(organizationId, payload) {
     if (maxBytes > 0) {
       for (const att of payload.attachments) {
         if (attachmentBytes(att) > maxBytes) {
-          throw new AppError(`Attachment exceeds ${limits.attachmentSizeMB}MB limit`, 429, 'LIMIT_001');
+          throw new AppError('Attachment exceeds ' + limits.attachmentSizeMB + 'MB limit', 429, 'LIMIT_001');
         }
       }
     }
@@ -58,76 +58,100 @@ async function enforceSendLimits(organizationId, payload) {
   const recipients = recipientCount(payload.to);
   const maxRecipients = limits.maxRecipientsPerEmail;
   if (typeof maxRecipients === 'number' && maxRecipients > 0 && recipients > maxRecipients) {
-    throw new AppError(`Max ${maxRecipients} recipients per email`, 429, 'LIMIT_001');
+    throw new AppError('Max ' + maxRecipients + ' recipients per email', 429, 'LIMIT_001');
   }
 
   return limits;
 }
 
-const sendEmail = async (req, res, next) => {
-  try {
-    const { from, fromName, to, subject, htmlBody, textBody, replyTo, templateId, variables, attachments, priority, tags } = req.body;
+async function dispatchUserEmail({ req, payload, source }) {
+  const { from, fromName, to, subject, htmlBody, textBody, replyTo, templateId, variables, attachments, priority, tags } = payload;
 
-    await enforceSendLimits(req.organizationId, req.body);
+  await enforceSendLimits(req.organizationId, payload);
 
-    const emailData = {
-      organizationId: req.organizationId,
-      userId: req.user?._id,
-      apiKeyId: req.apiKey?._id,
-      messageId: emailService.generateMessageId(),
-      from: from || process.env.SMTP_FROM_EMAIL,
-      fromName: fromName || process.env.SMTP_FROM_NAME,
-      to,
-      subject,
-      htmlBody,
-      textBody,
-      replyTo,
-      templateId,
-      variables,
-      attachments,
-      priority: priority || 'normal',
-      tags: tags || [],
-      tracking: req.body.tracking !== false,
-    };
+  const emailData = {
+    organizationId: req.organizationId,
+    userId: req.user?._id,
+    apiKeyId: req.apiKey?._id,
+    apiKeyName: req.apiKey?.name || null,
+    messageId: emailService.generateMessageId(),
+    from: from || process.env.SMTP_FROM_EMAIL,
+    fromName: fromName || process.env.SMTP_FROM_NAME,
+    to,
+    subject,
+    htmlBody,
+    textBody,
+    replyTo,
+    templateId,
+    variables,
+    attachments,
+    priority: priority || 'normal',
+    tags: tags || [],
+    tracking: payload.tracking !== false,
+  };
 
-    const incrResults = [];
-    for (const t of ['monthlyEmails', 'dailyEmails', 'hourlyEmails', 'rateLimitPerMinute', 'rateLimitPerHour']) {
-      const r = await rateLimitService.checkAndIncrement(req.organizationId, t, { units: 1 });
-      incrResults.push({ type: t, ok: r.allowed });
-      if (!r.allowed) {
-        for (const prev of incrResults) {
-          await rateLimitService.decrement(req.organizationId, prev.type, 1);
-        }
-        return next(new AppError(`${t} limit exceeded`, 429, 'LIMIT_001'));
-      }
-    }
-
-    try {
-      await queueService.addToQueue(emailData, emailData.priority);
-    } catch (err) {
+  const incrResults = [];
+  for (const t of ['monthlyEmails', 'dailyEmails', 'hourlyEmails', 'rateLimitPerMinute', 'rateLimitPerHour']) {
+    const r = await rateLimitService.checkAndIncrement(req.organizationId, t, { units: 1 });
+    incrResults.push({ type: t, ok: r.allowed });
+    if (!r.allowed) {
       for (const prev of incrResults) {
         await rateLimitService.decrement(req.organizationId, prev.type, 1);
       }
-      throw err;
+      throw new AppError(t + ' limit exceeded', 429, 'LIMIT_001');
     }
+  }
 
-    await EmailLog.create({
+  try {
+    await emailService.writeLog({
+      messageId: emailData.messageId,
       organizationId: req.organizationId,
       userId: req.user?._id,
       apiKeyId: req.apiKey?._id,
-      messageId: emailData.messageId,
-      from: { email: emailData.from, name: emailData.fromName },
-      to: Array.isArray(to) ? to[0] : { email: to },
+      apiKeyName: req.apiKey?.name || null,
+      source,
+      templateId,
+      from: emailData.from,
+      fromName: emailData.fromName,
+      to: typeof to === 'string' ? to : (Array.isArray(to) ? to[0] : to?.email),
       subject,
       htmlBody,
       textBody,
-      status: 'queued',
       priority: emailData.priority,
       tags: emailData.tags,
+      attachments: emailData.attachments,
     });
 
-    logger.info(`Email queued: ${emailData.messageId}`);
+    await queueService.addToQueue(emailData, emailData.priority);
+  } catch (err) {
+    for (const prev of incrResults) {
+      await rateLimitService.decrement(req.organizationId, prev.type, 1);
+    }
+    throw err;
+  }
 
+  return emailData;
+}
+
+const sendEmail = async (req, res, next) => {
+  try {
+    const emailData = await dispatchUserEmail({ req, payload: req.body, source: 'api' });
+    logger.info('Email queued: ' + emailData.messageId + ' source=api');
+    res.status(200).json({
+      success: true,
+      messageId: emailData.messageId,
+      status: 'queued',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+const sendEmailFromDashboard = async (req, res, next) => {
+  try {
+    const emailData = await dispatchUserEmail({ req, payload: req.body, source: 'dashboard' });
+    logger.info('Email queued: ' + emailData.messageId + ' source=dashboard');
     res.status(200).json({
       success: true,
       messageId: emailData.messageId,
@@ -158,7 +182,7 @@ const sendBulkEmails = async (req, res, next) => {
         if (typeof maxRecipients === 'number' && maxRecipients > 0) {
           const rc = recipientCount(emailData.to);
           if (rc > maxRecipients) {
-            errors.push({ email: emailData.to, error: `Max ${maxRecipients} recipients per email` });
+            errors.push({ email: emailData.to, error: 'Max ' + maxRecipients + ' recipients per email' });
             continue;
           }
         }
@@ -168,7 +192,7 @@ const sendBulkEmails = async (req, res, next) => {
           if (maxBytes > 0) {
             const tooBig = emailData.attachments.some((a) => attachmentBytes(a) > maxBytes);
             if (tooBig) {
-              errors.push({ email: emailData.to, error: `Attachment exceeds ${limits.attachmentSizeMB}MB limit` });
+              errors.push({ email: emailData.to, error: 'Attachment exceeds ' + limits.attachmentSizeMB + 'MB limit' });
               continue;
             }
           }
@@ -178,6 +202,7 @@ const sendBulkEmails = async (req, res, next) => {
           organizationId: req.organizationId,
           userId: req.user?._id,
           apiKeyId: req.apiKey?._id,
+          apiKeyName: req.apiKey?.name || null,
           messageId: emailService.generateMessageId(),
           ...emailData,
         };
@@ -192,13 +217,31 @@ const sendBulkEmails = async (req, res, next) => {
             for (const prev of incrResults) {
               await rateLimitService.decrement(req.organizationId, prev.type, 1);
             }
-            errors.push({ email: emailData.to, error: `${t} limit exceeded` });
+            errors.push({ email: emailData.to, error: t + ' limit exceeded' });
             break;
           }
         }
         if (blocked) continue;
 
         try {
+          await emailService.writeLog({
+            messageId: emailPayload.messageId,
+            organizationId: req.organizationId,
+            userId: req.user?._id,
+            apiKeyId: req.apiKey?._id,
+            apiKeyName: req.apiKey?.name || null,
+            source: 'api',
+            from: emailPayload.from || process.env.SMTP_FROM_EMAIL,
+            fromName: emailPayload.fromName || process.env.SMTP_FROM_NAME,
+            to: typeof emailPayload.to === 'string' ? emailPayload.to : emailPayload.to?.email,
+            subject: emailPayload.subject,
+            htmlBody: emailPayload.htmlBody,
+            textBody: emailPayload.textBody,
+            priority: emailPayload.priority || 'normal',
+            tags: emailPayload.tags || [],
+            attachments: emailPayload.attachments,
+          });
+
           await queueService.addToQueue(emailPayload, emailData.priority || 'normal');
         } catch (err) {
           for (const prev of incrResults) {
@@ -232,7 +275,7 @@ const getEmailStatus = async (req, res, next) => {
     const emailLog = await EmailLog.findOne({
       messageId,
       organizationId: req.organizationId,
-    }).select('messageId status from to subject deliveryDetails tracking bounce spam createdAt');
+    }).select('messageId status source apiKeyName from to subject deliveryDetails tracking bounce spam createdAt');
 
     if (!emailLog) {
       return next(new AppError('Email not found', 404, 'NOT_FOUND'));
@@ -274,6 +317,7 @@ const trackClick = async (req, res) => {
 
 module.exports = {
   sendEmail,
+  sendEmailFromDashboard,
   sendBulkEmails,
   getEmailStatus,
   trackOpen,

@@ -103,6 +103,7 @@ const sendToUser = async (req, res, next) => {
       messageHtml: message,
     }, {
       priority: 'high',
+      source: 'broadcast',
       organizationId: user.organizationId,
       userId: user._id,
       fromName: fromName || 'HDM BRIDGE Admin',
@@ -139,6 +140,7 @@ const sendToAllUsers = async (req, res, next) => {
           messageHtml: message,
         }, {
           priority: 'normal',
+          source: 'broadcast',
           organizationId: user.organizationId,
           userId: user._id,
           fromName: fromName || 'HDM BRIDGE Admin',

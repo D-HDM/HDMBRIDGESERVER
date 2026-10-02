@@ -35,7 +35,7 @@ const register = async (req, res, next) => {
         status: 'active',
         paymentMethod: 'manual',
         currentPeriodStart: new Date(),
-        currentPeriodEnd: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+        currentPeriodEnd: new Date(Date.now() + 100 * 365 * 24 * 60 * 60 * 1000),
         currentUsage: { monthlyEmails: 0, apiKeys: 0, domains: 0, templates: 0 },
       });
     }
@@ -64,6 +64,7 @@ const register = async (req, res, next) => {
       expiresHours: 24,
     }, {
       priority: 'high',
+      source: 'system',
       organizationId: organization._id,
       userId: user._id,
     }).catch((err) => logger.error('Verification email failed: ' + err.message));
@@ -182,6 +183,7 @@ const forgotPassword = async (req, res, next) => {
       expiresMinutes: 60,
     }, {
       priority: 'high',
+      source: 'system',
       organizationId: user.organizationId,
       userId: user._id,
     }).catch((err) => logger.error('Password reset email failed: ' + err.message));
@@ -219,6 +221,7 @@ const resetPassword = async (req, res, next) => {
       userAgent: req.headers['user-agent'],
     }, {
       priority: 'high',
+      source: 'system',
       organizationId: user.organizationId,
       userId: user._id,
     }).catch((err) => logger.error('Password changed email failed: ' + err.message));
@@ -251,6 +254,7 @@ const verifyEmail = async (req, res, next) => {
       firstName: user.firstName,
       dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
     }, {
+      source: 'system',
       organizationId: user.organizationId,
       userId: user._id,
     }).catch((err) => logger.error('Welcome email failed: ' + err.message));

@@ -2,12 +2,14 @@ const stripeService = require('../../services/stripeService');
 const mpesaService = require('../../services/mpesaService');
 const paypalService = require('../../services/paypalService');
 const emailService = require('../../services/emailService');
+const adminNotifier = require('../../services/adminNotifier');
 const rateLimitService = require('../../services/rateLimitService');
 const Transaction = require('../../models/client/Transaction');
 const Subscription = require('../../models/client/Subscription');
 const Invoice = require('../../models/client/Invoice');
 const Plan = require('../../models/client/Plan');
 const User = require('../../models/client/User');
+const Organization = require('../../models/client/Organization');
 const { invalidateSubscriptionState } = require('../../middleware/client/requireActiveSubscription');
 const { AppError } = require('../../middleware/common/errorHandler');
 const logger = require('../../utils/logger');
@@ -39,13 +41,14 @@ async function activateSubscription(organizationId, planId, paymentMethod, invoi
   let base;
   if (isRenewal && originalEnd && originalEnd > now) {
     base = originalEnd;
-  } else if (isRenewal && wasFrozen) {
-    base = now;
   } else {
     base = now;
   }
 
-  const interval = plan?.price?.interval || 'month';
+  const interval = invoice?.planInterval
+    || plan?.price?.interval
+    || 'month';
+
   const periodEnd = new Date(base.getTime() + intervalToDays(interval) * 24 * 60 * 60 * 1000);
 
   const subscription = await Subscription.findOneAndUpdate(
@@ -69,7 +72,7 @@ async function activateSubscription(organizationId, planId, paymentMethod, invoi
   await rateLimitService.invalidatePlanCache(organizationId.toString());
   await invalidateSubscriptionState(organizationId.toString());
 
-  return { subscription, plan, startDate: base, periodEnd, wasFrozen };
+  return { subscription, plan, startDate: base, periodEnd, wasFrozen, interval };
 }
 
 const stripeWebhook = async (req, res) => {
@@ -152,7 +155,7 @@ const stripeWebhook = async (req, res) => {
             periodStart: startDate,
             periodEnd,
             dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
-          }, { priority: 'high', organizationId: metaOrgId, userId: user._id })
+          }, { priority: 'high', source: 'system', organizationId: metaOrgId, userId: user._id })
             .catch((err) => logger.error('Stripe subscriptionRenewed email failed: ' + err.message));
         } else {
           await emailService.send(user.email, 'paymentReceived', {
@@ -164,7 +167,7 @@ const stripeWebhook = async (req, res) => {
             method: 'Card (Stripe)',
             reference: providerRef,
             paidAt: new Date(),
-          }, { priority: 'high', organizationId: metaOrgId, userId: user._id })
+          }, { priority: 'high', source: 'system', organizationId: metaOrgId, userId: user._id })
             .catch((err) => logger.error('Stripe paymentReceived email failed: ' + err.message));
 
           await emailService.send(user.email, 'subscriptionActivated', {
@@ -173,10 +176,23 @@ const stripeWebhook = async (req, res) => {
             periodStart: startDate,
             periodEnd,
             dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
-          }, { priority: 'high', organizationId: metaOrgId, userId: user._id })
+          }, { priority: 'high', source: 'system', organizationId: metaOrgId, userId: user._id })
             .catch((err) => logger.error('Stripe subscriptionActivated email failed: ' + err.message));
         }
       }
+
+      const org = await Organization.findById(metaOrgId).select('name').lean();
+
+      await adminNotifier.notifyAdmins('adminPaymentReceived', {
+        orgName: org?.name || 'N/A',
+        userEmail: user?.email || '—',
+        planName: plan?.name || invoice?.planName || 'Subscription',
+        amount: transaction?.amount,
+        currency: transaction?.currency,
+        method: 'Card (Stripe)',
+        reference: providerRef,
+        invoiceNumber: invoice?.invoiceNumber,
+      }, { organizationId: metaOrgId, priority: 'high' });
 
       logger.info('Stripe payment confirmed: ' + providerRef + ' org=' + metaOrgId);
     }
@@ -259,7 +275,7 @@ async function processMpesaCallback(payload, parsed) {
             periodStart: startDate,
             periodEnd,
             dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
-          }, { priority: 'high', organizationId: transaction.organizationId, userId: user._id })
+          }, { priority: 'high', source: 'system', organizationId: transaction.organizationId, userId: user._id })
             .catch((err) => logger.error('M-Pesa subscriptionRenewed email failed: ' + err.message));
         } else {
           await emailService.send(user.email, 'paymentReceived', {
@@ -271,7 +287,7 @@ async function processMpesaCallback(payload, parsed) {
             method: 'M-Pesa STK Push',
             reference: parsed.mpesaReceiptNumber,
             paidAt: new Date(),
-          }, { priority: 'high', organizationId: transaction.organizationId, userId: user._id })
+          }, { priority: 'high', source: 'system', organizationId: transaction.organizationId, userId: user._id })
             .catch((err) => logger.error('M-Pesa paymentReceived email failed: ' + err.message));
 
           await emailService.send(user.email, 'subscriptionActivated', {
@@ -280,10 +296,23 @@ async function processMpesaCallback(payload, parsed) {
             periodStart: startDate,
             periodEnd,
             dashboardUrl: (process.env.CLIENT_URL || '') + '/dashboard',
-          }, { priority: 'high', organizationId: transaction.organizationId, userId: user._id })
+          }, { priority: 'high', source: 'system', organizationId: transaction.organizationId, userId: user._id })
             .catch((err) => logger.error('M-Pesa subscriptionActivated email failed: ' + err.message));
         }
       }
+
+      const org = await Organization.findById(transaction.organizationId).select('name').lean();
+
+      await adminNotifier.notifyAdmins('adminPaymentReceived', {
+        orgName: org?.name || 'N/A',
+        userEmail: user?.email || '—',
+        planName: plan?.name || invoice?.planName || 'Subscription',
+        amount: transaction.convertedAmount || transaction.amount,
+        currency: transaction.currency,
+        method: 'M-Pesa STK Push',
+        reference: parsed.mpesaReceiptNumber,
+        invoiceNumber: invoice?.invoiceNumber || transaction.invoiceNumber,
+      }, { organizationId: transaction.organizationId, priority: 'high' });
 
       logger.info('M-Pesa payment confirmed: ' + parsed.mpesaReceiptNumber + ' org=' + transaction.organizationId);
     } else {
@@ -301,7 +330,7 @@ async function processMpesaCallback(payload, parsed) {
           invoiceNumber: transaction.invoiceNumber,
           reason: parsed.resultDesc || 'Payment was not completed',
           supportUrl: (process.env.CLIENT_URL || '') + '/support',
-        }, { priority: 'normal', organizationId: transaction.organizationId, userId: user._id })
+        }, { priority: 'normal', source: 'system', organizationId: transaction.organizationId, userId: user._id })
           .catch((err) => logger.error('M-Pesa paymentRejected email failed: ' + err.message));
       }
 
